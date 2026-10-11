@@ -21,7 +21,7 @@
 //
 // Configuration (all optional)
 //   { "plugins": [{ "package": "./opencode-auto-classifier", "options": {
-//       "model": "jev-1.13-free",     // jev-1.13-free needs no key
+//       "model": "jev-1.13",          // paid Jev (needs an inference key)
 //       "askRisk": 0.7,                // risk >= this         -> ask
 //       "askDestructive": 0.4,         // destructive >= this  -> ask
 //       "askSecret": 0.8,              // secret exposure >= this -> ask
@@ -32,12 +32,15 @@
 //       "failMode": "open"             // "open" leaves the decision unchanged on error
 //   } }] }
 //
-// The free model works anonymously; the paid one reads OPENCODE_API_KEY.
+// Calls are either the paid Jev model or, on failure, the LLM fallback; the
+// paid model reads its key from OPENCODE_API_KEY when no explicit one is set.
 
 import { createClassifier } from "./jev.ts"
 import { JevClassifierRpc } from "./rpc.ts"
 
 type FailMode = "open" | "closed"
+
+type ActionThresholds = { risk?: number; destructive?: number; secret?: number }
 
 type Options = {
   model?: string
@@ -51,6 +54,9 @@ type Options = {
   denyDestructive?: number
   denyRisk?: number
   privilegedAsk?: boolean
+  escalateTo?: "ask" | "deny"
+  /** Per-action overrides for the escalation thresholds above. */
+  escalate?: Partial<Record<"shell" | "read" | "edit", ActionThresholds>>
   fallback?: boolean
   fallbackModel?: string
   failMode?: FailMode
@@ -64,7 +70,7 @@ type Decision = {
 }
 
 const DEFAULTS = {
-  model: "jev-1.13-free",
+  model: "jev-1.13",
   timeoutMs: 10_000,
   askRisk: 0.7,
   askDestructive: 0.4,
@@ -73,6 +79,8 @@ const DEFAULTS = {
   denyDestructive: 0.97,
   denyRisk: 1.01,
   privilegedAsk: true,
+  escalateTo: "ask" as "ask" | "deny",
+  escalate: {} as Partial<Record<"shell" | "read" | "edit", ActionThresholds>>,
   fallback: true,
   fallbackModel: "opencode-go/deepseek-v4.1-flash",
   failMode: "open" as FailMode,
@@ -103,6 +111,17 @@ function decide(classification: any, opts: Required<Options>, action = "shell"):
   // can destroy data — for those, "risk" is ~100% for every write and would
   // otherwise prompt on every source edit.
   const shell = action === "shell"
+  // Escalations (the middle tier) resolve to `ask` or `deny` depending on
+  // `escalateTo`. With "deny" the plugin is allow-or-deny only, so an agent
+  // never waits on a prompt.
+  const escalate = (reason: string): Decision => ({ effect: opts.escalateTo, reason })
+
+  // Effective escalation thresholds: per-action overrides fall back to the
+  // global ask* values.
+  const esc = opts.escalate?.[action as "shell" | "read" | "edit"] ?? {}
+  const escDestructive = esc.destructive ?? opts.askDestructive
+  const escSecret = esc.secret ?? opts.askSecret
+  const escRisk = esc.risk ?? opts.askRisk
 
   if (destructive >= opts.denyDestructive) {
     return { effect: "deny", reason: `Jev flagged this as destructive. ${bits}` }
@@ -113,17 +132,17 @@ function decide(classification: any, opts: Required<Options>, action = "shell"):
   if (shell && risk >= opts.denyRisk) {
     return { effect: "deny", reason: `Jev rated this action critical. ${bits}` }
   }
-  if (destructive >= opts.askDestructive) {
-    return { effect: "ask", reason: `Jev flagged possible data loss. ${bits}` }
+  if (destructive >= escDestructive) {
+    return escalate(`Jev flagged possible data loss. ${bits}`)
   }
-  if (secretExposure >= opts.askSecret) {
-    return { effect: "ask", reason: `Jev flagged possible secret exposure. ${bits}` }
+  if (secretExposure >= escSecret) {
+    return escalate(`Jev flagged possible secret exposure. ${bits}`)
   }
-  if (shell && risk >= opts.askRisk) {
-    return { effect: "ask", reason: `Jev rated this action risky. ${bits}` }
+  if (shell && risk >= escRisk) {
+    return escalate(`Jev rated this action risky. ${bits}`)
   }
   if (shell && opts.privilegedAsk && category === "privileged") {
-    return { effect: "ask", reason: `Privileged action. ${bits}` }
+    return escalate(`Privileged action. ${bits}`)
   }
   return { effect: undefined, reason: bits }
 }
@@ -294,8 +313,8 @@ export default {
       } catch (error) {
         log("classification failed", String(error))
         if (opts.failMode === "closed" && event.effect === "allow") {
-          event.effect = "ask"
-          event.message = `[jev-classifier] Jev unavailable; confirming manually. (${String(error).slice(0, 120)})`
+          event.effect = opts.escalateTo
+          event.message = `[jev-classifier] Jev unavailable; failing ${opts.escalateTo}. (${String(error).slice(0, 120)})`
         }
         return
       }

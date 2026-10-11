@@ -6,14 +6,15 @@
 // does not stream.
 //
 // Verified against https://opencode.ai/zen/v1/systemone on 2026-10-11:
-//   jev-1.13-free  -> anonymous, no API key required
-//   jev-1.13       -> requires Authorization: Bearer <OPENCODE_API_KEY>
+//   jev-1.13       -> requires Authorization: Bearer <inference-scoped key>
+// There is deliberately no free-model default: calls are either the paid Jev
+// model (with a key) or, when that fails, the plugin's LLM fallback.
 
 export const DEFAULT_ENDPOINT = "https://opencode.ai/zen/v1/systemone"
-export const DEFAULT_MODEL = "jev-1.13-free"
+export const DEFAULT_MODEL = "jev-1.13"
 
 export type JevOptions = {
-  /** Model id, e.g. "jev-1.13-free" (free, no key) or "jev-1.13". */
+  /** Model id. Defaults to "jev-1.13" (paid, needs an inference key). */
   model?: string
   /** System One endpoint. Defaults to the OpenCode Zen route. */
   endpoint?: string
