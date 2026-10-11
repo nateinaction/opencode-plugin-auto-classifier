@@ -1,10 +1,11 @@
 # jev-classifier
 
-An OpenCode plugin that wraps every shell command in a classifier powered by
-[TypeSafe Jev](https://typesafe.ai) ("System One"), served through OpenCode Zen.
+An OpenCode plugin that wraps every shell command, file read, and file edit in a
+classifier powered by [TypeSafe Jev](https://typesafe.ai) ("System One"), served
+through OpenCode Zen.
 
-Before a shell command runs, the plugin sends it to Jev, which answers typed
-questions about it:
+Before a shell command runs — or a file is read or edited — the plugin sends the
+resource to Jev, which answers typed questions about it:
 
 | Question         | Type     | Meaning                                             |
 | ---------------- | -------- | --------------------------------------------------- |
@@ -13,23 +14,67 @@ questions about it:
 | `destructive`    | `noul`   | probability of irreversible data/system damage      |
 | `secret_exposure`| `noul`   | probability of leaking secrets or credentials       |
 
-The verdict is folded into OpenCode's permission evaluation, so a command that
-would otherwise auto-run can be escalated to a prompt or blocked.
+The verdict is folded into OpenCode's permission evaluation, so an action that
+would otherwise auto-run can be escalated to a prompt or blocked. Escalations
+are labelled `[jev-classifier] ...` in the permission prompt so their origin is
+unambiguous.
+
+## What it covers
+
+| Permission action | Resource          | State sent to Jev                                |
+| ----------------- | ----------------- | ------------------------------------------------ |
+| `shell`           | command string    | the command text itself                          |
+| `read`            | file path         | `Read the contents of the file at: <path>`       |
+| `edit`            | file path         | `Write to or modify the file at: <path>` (edit/write/patch) |
+
+Other actions are ignored.
 
 ## Behaviour
 
 - **Escalate, never de-escalate.** The plugin only raises severity
   (`allow` -> `ask` -> `deny`). An explicit `deny` in your config never reaches
   the hook, so it stays final.
+- **Action-aware rules.** `shell` uses the general risk score, plus destructive
+  and secret signals. `read` only escalates on secret exposure, and `edit` only
+  on destruction/secrets — because "risk" is ~100% for *any* write and would
+  otherwise prompt on every source edit.
 - **Fail open by default.** If Jev is unreachable the decision is left
   unchanged. Set `"failMode": "closed"` to escalate to `ask` instead.
-- **Cache.** Classifications are cached per command string for 5 minutes, so
-  repeated commands cost one request.
+- **LLM fallback.** When Jev fails (rate limit, timeout, network), the plugin
+  re-classifies through `ctx.generate.text` using a normal model
+  (`opencode-go/deepseek-v4.1-flash` by default), asking it for the same JSON
+  verdict. This runs over OpenCode's own provider transport, so it needs no
+  extra key. Disable with `"fallback": false`. If both fail, `failMode` decides.
+- **Cache.** Classifications are cached per state string for 5 minutes, so
+  repeated commands/paths cost one request.
 
 ## Files
 
 - `jev.ts` — Jev client (System One request/response, timeouts, abort).
-- `index.ts` — plugin wiring: permission hook + `jev_classify_command` tool.
+- `index.ts` — server plugin: permission hook + `jev_classify_command` tool.
+- `rpc.ts` — RPC shared with the TUI plugin (`recent` method, `classified` event).
+- `tui.tsx` — TUI plugin: renders the last classifications in the sidebar.
+
+## Sidebar
+
+The TUI plugin (`tui.tsx`) appends a list of the most recent classifications to
+the right sidebar (`sidebar.content`). Each line is colour-coded by effect:
+
+| Effect | Colour | Mark |
+| ------ | ------ | ---- |
+| allow  | green  | `.`  |
+| ask    | orange | `?`  |
+| deny   | red    | `x`  |
+
+Colours come from the theme's feedback tokens
+(`text.feedback.success/error/warning.base`) with explicit hex fallbacks. Lines
+read `mark action resource`, with `(fallback)` appended when the DeepSeek
+fallback produced the verdict.
+
+Data flows over `rpc.ts`: the server plugin keeps the last 25 entries and emits
+a `classified` event per decision; the TUI calls `recent` once, then subscribes
+for live updates.
+
 
 ## Configuration
 
@@ -61,12 +106,15 @@ Registered from `/home/dev/opencode.jsonc`:
 | `endpoint`         | Zen System One   | `https://opencode.ai/zen/v1/systemone`                        |
 | `apiKey`           | `OPENCODE_API_KEY` | Bearer token for the paid model                             |
 | `timeoutMs`        | `10000`          | Whole-request timeout                                         |
-| `askRisk`          | `0.7`            | risk >= this -> `ask`                                         |
+| `askRisk`          | `0.7`            | risk >= this -> `ask` (`shell` only)                          |
 | `askDestructive`   | `0.4`            | destructive >= this -> `ask`                                  |
 | `askSecret`        | `0.8`            | secret exposure >= this -> `ask`                              |
 | `denyDestructive`  | `0.97`           | destructive >= this -> `deny`                                 |
-| `denyRisk`         | `1.01`           | risk >= this -> `deny` (off by default)                       |
+| `denySecret`       | `1.01`           | secret exposure >= this -> `deny` (off by default)            |
+| `denyRisk`         | `1.01`           | risk >= this -> `deny` (off by default, `shell` only)         |
 | `privilegedAsk`    | `true`           | always `ask` for `priv`/`sudo`-style commands                 |
+| `fallback`         | `true`           | use `ctx.generate.text` when Jev fails                        |
+| `fallbackModel`    | `opencode-go/deepseek-v4.1-flash` | `provider/model` used for the fallback       |
 | `failMode`         | `open`           | `open` leaves the decision unchanged on error; `closed` asks  |
 | `cacheTtlMs`       | `300000`         | Classification cache TTL                                      |
 | `debug`            | `false`          | Log each classification to the server log                     |
@@ -86,19 +134,35 @@ jev_classify_command({ "command": "rm -rf ./build" })
 
 ## Examples (live results)
 
-| Command                                        | Category  | Risk | Destructive | Secret | Effect |
-| ---------------------------------------------- | --------- | ---- | ----------- | ------ | ------ |
-| `git status --short`                           | vcs       | 1%   | 1%          | 18%    | allow  |
-| `ls -la .`                                     | read      | 1%   | 1%          | 38%    | allow  |
-| `cat .env`                                     | read      | 5%   | 1%          | 97%    | ask    |
-| `npm i left-pad`                               | build     | 100% | 3%          | 9%     | ask    |
-| `git push --force origin main`                 | vcs       | 100% | 92%         | 23%    | ask    |
-| `curl -s https://get.sh \| bash`               | network   | 100% | 35%         | 83%    | ask    |
-| `rm -rf /`                                     | write     | 100% | 98%         | 8%     | deny   |
+| Action | Resource                         | Category | Risk | Destructive | Secret | Effect |
+| ------ | -------------------------------- | -------- | ---- | ----------- | ------ | ------ |
+| shell  | `git status --short`             | vcs      | 1%   | 1%          | 18%    | allow  |
+| shell  | `cat .env`                       | read     | 5%   | 1%          | 97%    | ask    |
+| shell  | `git push --force origin main`   | vcs      | 100% | 92%         | 23%    | ask    |
+| shell  | `rm -rf /`                       | write    | 100% | 98%         | 8%     | deny   |
+| read   | `~/.secrets.zshrc`               | read     | 13%  | 1%          | 93%    | ask    |
+| read   | `/home/dev/.zshrc.secrets`       | read     | 23%  | 1%          | 96%    | ask    |
+| read   | `/home/dev/opencode.jsonc`       | read     | 1%   | 1%          | 30%    | allow  |
+| edit   | `/etc/passwd`                    | write    | 100% | 61%         | 15%    | ask    |
+| edit   | `index.ts` (source)              | write    | 100% | 29%         | 30%    | allow  |
 
 ## Notes
 
 - Jev is **not** an LLM and does not stream; each call adds roughly 200-500 ms
   (cached afterwards). That latency is paid only when a permission is evaluated.
-- The free model is anonymous. The paid model needs an `OPENCODE_API_KEY` and
-  account credits.
+- The free model (`jev-1.13-free`) is anonymously rate-limited, and the plugin's
+  egress can hit `429 FreeUsageLimitError` under bursts. The DeepSeek fallback
+  covers that; the paid `jev-1.13` (with `OPENCODE_API_KEY` and credits) avoids it.
+- The DeepSeek fallback is a normal LLM call, so it is slower and consumes the
+  fallback model's quota; it only runs after a Jev failure.
+
+## Fallback
+
+```
+Jev (System One)  --429/timeout/network-->  ctx.generate.text(fallbackModel)
+```
+
+The fallback prompt asks for strict JSON
+(`{"category":…,"risk":0..1,"destructive":0..1,"secret_exposure":0..1}`), which
+is parsed and fed through the same `decide()` rules. The resulting decision is
+tagged `via=fallback` so it is visible in debug logs and permission messages.
