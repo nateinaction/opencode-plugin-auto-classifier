@@ -1,0 +1,137 @@
+// Pure decision logic for jev-classifier.
+//
+// Everything in this module is side-effect free and depends only on its
+// arguments, so it can be unit-tested without the OpenCode plugin runtime. The
+// server plugin (index.ts) imports these to turn a Jev classification into an
+// OpenCode permission decision.
+
+export type FailMode = "open" | "closed"
+
+export type ActionThresholds = { risk?: number; destructive?: number; secret?: number }
+
+export type Options = {
+  model?: string
+  endpoint?: string
+  apiKey?: string
+  timeoutMs?: number
+  askRisk?: number
+  askDestructive?: number
+  askSecret?: number
+  denySecret?: number
+  denyDestructive?: number
+  denyRisk?: number
+  privilegedAsk?: boolean
+  escalateTo?: "ask" | "deny"
+  /** Per-action overrides for the escalation thresholds above. */
+  escalate?: Partial<Record<"shell" | "read" | "edit", ActionThresholds>>
+  fallback?: boolean
+  fallbackModel?: string
+  failMode?: FailMode
+  cacheTtlMs?: number
+  debug?: boolean
+}
+
+export type Decision = {
+  effect: "ask" | "deny" | undefined
+  reason: string
+}
+
+export const DEFAULTS = {
+  model: "jev-1.13",
+  timeoutMs: 10_000,
+  askRisk: 0.7,
+  askDestructive: 0.4,
+  askSecret: 0.8,
+  denySecret: 1.01,
+  denyDestructive: 0.97,
+  denyRisk: 1.01,
+  privilegedAsk: true,
+  escalateTo: "ask" as "ask" | "deny",
+  escalate: {} as Partial<Record<"shell" | "read" | "edit", ActionThresholds>>,
+  fallback: true,
+  fallbackModel: "opencode-go/deepseek-v4.1-flash",
+  failMode: "open" as FailMode,
+  cacheTtlMs: 5 * 60_000,
+}
+
+/** Format a 0..1 score as a whole-number percentage, e.g. 0.61 -> "61%". */
+export function pct(n: number): string {
+  return `${Math.round(n * 100)}%`
+}
+
+/** Coerce any value to a finite number clamped to the 0..1 range. */
+export function normalize01(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value)
+  if (!Number.isFinite(n)) return 0
+  return Math.min(1, Math.max(0, n))
+}
+
+/** Split a `provider/model` reference, defaulting the provider. */
+export function parseModelRef(ref: string): { providerID: string; id: string } {
+  const slash = ref.indexOf("/")
+  if (slash === -1) return { providerID: "opencode-go", id: ref }
+  return { providerID: ref.slice(0, slash), id: ref.slice(slash + 1) }
+}
+
+export function decide(classification: any, opts: Required<Options>, action = "shell"): Decision {
+  const { category, risk, destructive, secretExposure } = classification
+  const bits = `category=${category} risk=${pct(risk)} destructive=${pct(destructive)} secret=${pct(secretExposure)} via=${classification.source ?? "jev"}`
+  // Shell commands are free-form, so the general risk score is meaningful. A
+  // read is only interesting when it can expose secrets, and an edit when it
+  // can destroy data — for those, "risk" is ~100% for every write and would
+  // otherwise prompt on every source edit.
+  const shell = action === "shell"
+  // Escalations (the middle tier) resolve to `ask` or `deny` depending on
+  // `escalateTo`. With "deny" the plugin is allow-or-deny only, so an agent
+  // never waits on a prompt.
+  const escalate = (reason: string): Decision => ({ effect: opts.escalateTo, reason })
+
+  // Effective escalation thresholds: per-action overrides fall back to the
+  // global ask* values.
+  const esc = opts.escalate?.[action as "shell" | "read" | "edit"] ?? {}
+  const escDestructive = esc.destructive ?? opts.askDestructive
+  const escSecret = esc.secret ?? opts.askSecret
+  const escRisk = esc.risk ?? opts.askRisk
+
+  if (destructive >= opts.denyDestructive) {
+    return { effect: "deny", reason: `Jev flagged this as destructive. ${bits}` }
+  }
+  if (secretExposure >= opts.denySecret) {
+    return { effect: "deny", reason: `Jev flagged certain secret exposure. ${bits}` }
+  }
+  if (shell && risk >= opts.denyRisk) {
+    return { effect: "deny", reason: `Jev rated this action critical. ${bits}` }
+  }
+  if (destructive >= escDestructive) {
+    return escalate(`Jev flagged possible data loss. ${bits}`)
+  }
+  if (secretExposure >= escSecret) {
+    return escalate(`Jev flagged possible secret exposure. ${bits}`)
+  }
+  if (shell && risk >= escRisk) {
+    return escalate(`Jev rated this action risky. ${bits}`)
+  }
+  if (shell && opts.privilegedAsk && category === "privileged") {
+    return escalate(`Privileged action. ${bits}`)
+  }
+  return { effect: undefined, reason: bits }
+}
+
+/** Merge user options over the defaults, ignoring explicit `undefined`s. */
+export function normalize(options: Options): Required<Options> {
+  return { ...DEFAULTS, ...Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined)) } as Required<Options>
+}
+
+export function rank(effect: "allow" | "ask" | "deny"): number {
+  return effect === "deny" ? 2 : effect === "ask" ? 1 : 0
+}
+
+// Map a permission action + resource to a state Jev can reason about.
+// Shell resources are command strings; read/edit resources are file paths,
+// which we describe in words because a bare path carries little signal.
+export function describe(action: string, resource: string): string | undefined {
+  if (action === "shell") return resource
+  if (action === "read") return `Read the contents of the file at: ${resource}`
+  if (action === "edit") return `Write to or modify the file at: ${resource}`
+  return undefined
+}

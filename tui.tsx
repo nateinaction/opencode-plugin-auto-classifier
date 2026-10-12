@@ -8,32 +8,7 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { For, createSignal, onCleanup } from "solid-js"
 import { JevClassifierRpc } from "./rpc.ts"
-
-type Entry = { at: number; action: string; resource: string; effect: string; reason: string; via: string }
-
-const LIMIT = 10
-const RESOURCE_MAX = 44
-
-// Fallbacks in case a theme token is missing; these match typical OpenTUI palettes.
-const GREEN = "#50fa7b"
-const RED = "#ff5555"
-const ORANGE = "#ffb86c"
-
-function mark(effect: string): string {
-  if (effect === "deny") return "x"
-  if (effect === "ask") return "?"
-  return "."
-}
-
-function trim(text: string): string {
-  const oneLine = (text ?? "").replace(/\s+/g, " ").trim()
-  return oneLine.length > RESOURCE_MAX ? oneLine.slice(0, RESOURCE_MAX - 1) + "\u2026" : oneLine
-}
-
-function line(entry: Entry): string {
-  const suffix = entry.via && entry.via !== "jev" ? ` (${entry.via})` : ""
-  return `${mark(entry.effect)} ${entry.action} ${trim(entry.resource)}${suffix}`
-}
+import { colorFor, line, LIMIT, type Entry } from "./format.ts"
 
 export default Plugin.define({
   id: "jev-classifier.tui",
@@ -43,11 +18,7 @@ export default Plugin.define({
 
     // Prefer semantic theme tokens; fall back to explicit colours.
     const feedback = context.theme?.text?.feedback ?? {}
-    const colorFor = (effect: string): string => {
-      if (effect === "deny") return feedback?.error?.base ?? RED
-      if (effect === "ask") return feedback?.warning?.base ?? ORANGE
-      return feedback?.success?.base ?? GREEN
-    }
+    const color = (effect: string): string => colorFor(effect, feedback)
 
     const refresh = async () => {
       try {
@@ -69,7 +40,7 @@ export default Plugin.define({
       render: () => (
         <box flexDirection="column">
           <text>Jev classifications</text>
-          <For each={entries()}>{(entry: Entry) => <text fg={colorFor(entry.effect)}>{line(entry)}</text>}</For>
+          <For each={entries()}>{(entry: Entry) => <text fg={color(entry.effect)}>{line(entry)}</text>}</For>
         </box>
       ),
     })
