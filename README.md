@@ -26,7 +26,7 @@ The plugin is a normal OpenCode plugin package: the server half is exported at
 publish required.
 
 ```sh
-opencode plugin add github:schemaitat/opencode-auto-classifier
+opencode plugin add github:schemaitat/opencode-plugin-auto-classifier
 ```
 
 That clones the repo, installs it, and registers it. Verify and update it with:
@@ -34,14 +34,14 @@ That clones the repo, installs it, and registers it. Verify and update it with:
 ```sh
 opencode plugin list
 opencode plugin check
-opencode plugin update opencode-auto-classifier
+opencode plugin update opencode-plugin-auto-classifier
 ```
 
 To pin a revision, append a branch, tag, or full commit hash:
 
 ```sh
-opencode plugin add github:schemaitat/opencode-auto-classifier#v0.1.0
-opencode plugin add git+ssh://git@github.com/schemaitat/opencode-auto-classifier.git#main
+opencode plugin add github:schemaitat/opencode-plugin-auto-classifier#v0.1.0
+opencode plugin add git+ssh://git@github.com/schemaitat/opencode-plugin-auto-classifier.git#main
 ```
 
 Or add it to `opencode.json(c)` by hand. Relative, absolute, and `file://`
@@ -51,7 +51,7 @@ paths work too, which is handy for local development:
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
-    "github:schemaitat/opencode-auto-classifier"
+    "github:schemaitat/opencode-plugin-auto-classifier"
   ]
 }
 ```
@@ -136,7 +136,7 @@ passed through the object form:
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "github:schemaitat/opencode-auto-classifier",
+      "package": "github:schemaitat/opencode-plugin-auto-classifier",
       "options": {
         "model": "jev-1.13",
         "apiKey": "oc_sk_...",

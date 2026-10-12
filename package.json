@@ -1,5 +1,5 @@
 {
-  "name": "opencode-auto-classifier",
+  "name": "opencode-plugin-auto-classifier",
   "version": "0.1.0",
   "description": "OpenCode plugin that classifies shell commands, file reads, and edits with TypeSafe Jev (System One) and folds the result into permission decisions.",
   "type": "module",
@@ -13,13 +13,13 @@
     "permissions",
     "classifier"
   ],
-  "homepage": "https://github.com/schemaitat/opencode-auto-classifier",
+  "homepage": "https://github.com/schemaitat/opencode-plugin-auto-classifier",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/schemaitat/opencode-auto-classifier.git"
+    "url": "git+https://github.com/schemaitat/opencode-plugin-auto-classifier.git"
   },
   "bugs": {
-    "url": "https://github.com/schemaitat/opencode-auto-classifier/issues"
+    "url": "https://github.com/schemaitat/opencode-plugin-auto-classifier/issues"
   },
   "exports": {
     ".": "./index.ts",
