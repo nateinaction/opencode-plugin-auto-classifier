@@ -1,0 +1,61 @@
+{
+  "name": "opencode-auto-classifier",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that classifies shell commands, file reads, and edits with TypeSafe Jev (System One) and folds the result into permission decisions.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "jev",
+    "system-one",
+    "security",
+    "permissions",
+    "classifier"
+  ],
+  "homepage": "https://github.com/schemaitat/opencode-auto-classifier",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schemaitat/opencode-auto-classifier.git"
+  },
+  "bugs": {
+    "url": "https://github.com/schemaitat/opencode-auto-classifier/issues"
+  },
+  "exports": {
+    ".": "./index.ts",
+    "./tui": "./tui.tsx"
+  },
+  "files": [
+    "index.ts",
+    "jev.ts",
+    "decide.ts",
+    "format.ts",
+    "rpc.ts",
+    "tui.tsx",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch"
+  },
+  "dependencies": {
+    "@opencode/plugin": "latest"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.8",
+    "@opentui/solid": ">=0.5.8",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  }
+}
