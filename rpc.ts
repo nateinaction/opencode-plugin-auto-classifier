@@ -1,4 +1,4 @@
-// RPC shared between the server plugin (index.ts) and the TUI plugin (tui.tsx).
+// RPC shared between the server plugin (index.ts) and the TUI plugin (tui.ts).
 //
 // The server records every classification it makes and emits a `classified`
 // event; the TUI reads `recent` once and then subscribes to live events to
@@ -21,7 +21,7 @@ const entrySchema = {
 } as const
 
 export const JevClassifierRpc = Rpc.define({
-  id: "jev-classifier",
+  id: "auto-classifier",
   methods: {
     recent: {
       // No meaningful arguments; an empty object keeps the call shape uniform.

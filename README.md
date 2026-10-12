@@ -1,4 +1,4 @@
-# jev-classifier
+# auto-classifier
 
 An OpenCode plugin that wraps every shell command, file read, and file edit in a
 classifier powered by [TypeSafe Jev](https://typesafe.ai) ("System One"), served
@@ -16,7 +16,7 @@ resource to Jev, which answers typed questions about it:
 
 The verdict is folded into OpenCode's permission evaluation, so an action that
 would otherwise auto-run can be escalated to a prompt or blocked. Escalations
-are labelled `[jev-classifier] ...` in the permission prompt so their origin is
+are labelled `[auto-classifier] ...` in the permission prompt so their origin is
 unambiguous.
 
 ## Installation
@@ -61,8 +61,10 @@ paths work too, which is handy for local development:
 - A paid Jev (System One) inference key, or the LLM fallback (see
   [Configuration](#configuration)). Without a key the plugin fails open by
   default.
-- The TUI sidebar half renders JSX, so it relies on OpenCode's bundled
-  OpenTUI/`solid-js` peers. It is optional; the server half works alone.
+- The TUI sidebar half imports OpenCode's bundled OpenTUI/`solid-js` host
+  modules through their runtime ids (`opentui:runtime-module:*`), so it works
+  from a `node_modules` install without shipping its own copies. It is optional;
+  the server half works alone.
 
 ## What it covers
 
@@ -102,12 +104,13 @@ Other actions are ignored.
 - `decide.ts` — pure decision logic (thresholds, escalation, `describe`), unit-tested.
 - `format.ts` — pure sidebar formatting helpers, unit-tested.
 - `rpc.ts` — RPC shared with the TUI plugin (`recent` method, `classified` event).
-- `tui.tsx` — TUI plugin: renders the last classifications in the sidebar.
-- `package.json` — `exports` map: `.` → `index.ts`, `./tui` → `tui.tsx`.
+- `tui.ts` — TUI plugin: renders the last classifications in the sidebar.
+- `virtual-modules.d.ts` — ambient types for the `opentui:runtime-module:*` host ids.
+- `package.json` — `exports` map: `.` → `index.ts`, `./tui` → `tui.ts`.
 
 ## Sidebar
 
-The TUI plugin (`tui.tsx`) appends a list of the most recent classifications to
+The TUI plugin (`tui.ts`) appends a list of the most recent classifications to
 the right sidebar (`sidebar.content`). Each line is colour-coded by effect:
 
 | Effect | Colour | Mark |

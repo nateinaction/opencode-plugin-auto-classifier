@@ -142,7 +142,7 @@ export function createClassifier(options: JevOptions = {}) {
       "Content-Type": "application/json",
       Accept: "application/json",
       // Identify the client so the Zen service sees real agent traffic.
-      "User-Agent": "opencode-jev-classifier/1.0",
+      "User-Agent": "opencode-auto-classifier/1.0",
     }
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`
 

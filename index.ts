@@ -1,4 +1,4 @@
-// jev-classifier - classify shell commands with TypeSafe Jev via OpenCode Zen.
+// auto-classifier - classify shell commands with TypeSafe Jev via OpenCode Zen.
 //
 // What it does
 //   Every shell command the agent tries to run, plus every file read and edit,
@@ -40,7 +40,7 @@ import { JevClassifierRpc } from "./rpc.ts"
 import { decide, describe, normalize, normalize01, parseModelRef, pct, rank, type Decision, type Options } from "./decide.ts"
 
 export default {
-  id: "jev-classifier",
+  id: "auto-classifier",
 
   async setup(ctx: any) {
     const opts = normalize((ctx.options ?? {}) as Options)
@@ -52,7 +52,7 @@ export default {
     })
 
     const log = (...args: unknown[]) => {
-      if (opts.debug) console.error("[jev-classifier]", ...args)
+      if (opts.debug) console.error("[auto-classifier]", ...args)
     }
 
     // Rolling record of recent classifications, exposed to the TUI plugin over
@@ -188,7 +188,7 @@ export default {
         log("classification failed", String(error))
         if (opts.failMode === "closed" && event.effect === "allow") {
           event.effect = opts.escalateTo
-          event.message = `[jev-classifier] Jev unavailable; failing ${opts.escalateTo}. (${String(error).slice(0, 120)})`
+          event.message = `[auto-classifier] Jev unavailable; failing ${opts.escalateTo}. (${String(error).slice(0, 120)})`
         }
         return
       }
@@ -197,13 +197,13 @@ export default {
       if (rank(decision.effect) <= rank(event.effect ?? "allow")) {
         // Only annotate an already-escalated request.
         if (decision.effect === "ask" && event.effect === "ask" && !event.message) {
-          event.message = `[jev-classifier] ${decision.reason}`
+          event.message = `[auto-classifier] ${decision.reason}`
         }
         return
       }
 
       event.effect = decision.effect
-      event.message = `[jev-classifier] ${decision.reason}`
+      event.message = `[auto-classifier] ${decision.reason}`
     })
 
     // On-demand classification tool. Useful when the agent wants to reason

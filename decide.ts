@@ -1,4 +1,4 @@
-// Pure decision logic for jev-classifier.
+// Pure decision logic for auto-classifier.
 //
 // Everything in this module is side-effect free and depends only on its
 // arguments, so it can be unit-tested without the OpenCode plugin runtime. The

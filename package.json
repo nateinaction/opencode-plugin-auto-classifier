@@ -1,6 +1,6 @@
 {
   "name": "opencode-plugin-auto-classifier",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode plugin that classifies shell commands, file reads, and edits with TypeSafe Jev (System One) and folds the result into permission decisions.",
   "type": "module",
   "license": "MIT",
@@ -23,7 +23,7 @@
   },
   "exports": {
     ".": "./index.ts",
-    "./tui": "./tui.tsx"
+    "./tui": "./tui.ts"
   },
   "files": [
     "index.ts",
@@ -31,7 +31,8 @@
     "decide.ts",
     "format.ts",
     "rpc.ts",
-    "tui.tsx",
+    "tui.ts",
+    "virtual-modules.d.ts",
     "README.md",
     "LICENSE"
   ],

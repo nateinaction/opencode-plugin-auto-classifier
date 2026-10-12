@@ -1,6 +1,6 @@
 // Pure formatting helpers for the TUI plugin.
 //
-// Kept separate from tui.tsx so they can be unit-tested without importing the
+// Kept separate from tui.ts so they can be unit-tested without importing the
 // OpenCode/OpenTUI runtime (solid-js, JSX, @opencode/plugin/tui).
 
 export type Entry = { at: number; action: string; resource: string; effect: string; reason: string; via: string }
