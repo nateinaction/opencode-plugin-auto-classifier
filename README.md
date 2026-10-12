@@ -19,6 +19,51 @@ would otherwise auto-run can be escalated to a prompt or blocked. Escalations
 are labelled `[jev-classifier] ...` in the permission prompt so their origin is
 unambiguous.
 
+## Installation
+
+The plugin is a normal OpenCode plugin package: the server half is exported at
+`.` and the TUI sidebar half at `./tui`. Install it straight from Git — no npm
+publish required.
+
+```sh
+opencode plugin add github:schemaitat/opencode-auto-classifier
+```
+
+That clones the repo, installs it, and registers it. Verify and update it with:
+
+```sh
+opencode plugin list
+opencode plugin check
+opencode plugin update opencode-auto-classifier
+```
+
+To pin a revision, append a branch, tag, or full commit hash:
+
+```sh
+opencode plugin add github:schemaitat/opencode-auto-classifier#v0.1.0
+opencode plugin add git+ssh://git@github.com/schemaitat/opencode-auto-classifier.git#main
+```
+
+Or add it to `opencode.json(c)` by hand. Relative, absolute, and `file://`
+paths work too, which is handy for local development:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    "github:schemaitat/opencode-auto-classifier"
+  ]
+}
+```
+
+### Requirements
+
+- A paid Jev (System One) inference key, or the LLM fallback (see
+  [Configuration](#configuration)). Without a key the plugin fails open by
+  default.
+- The TUI sidebar half renders JSX, so it relies on OpenCode's bundled
+  OpenTUI/`solid-js` peers. It is optional; the server half works alone.
+
 ## What it covers
 
 | Permission action | Resource          | State sent to Jev                                |
@@ -52,10 +97,13 @@ Other actions are ignored.
 
 ## Files
 
-- `jev.ts` — Jev client (System One request/response, timeouts, abort).
 - `index.ts` — server plugin: permission hook + `jev_classify_command` tool.
+- `jev.ts` — Jev client (System One request/response, timeouts, abort).
+- `decide.ts` — pure decision logic (thresholds, escalation, `describe`), unit-tested.
+- `format.ts` — pure sidebar formatting helpers, unit-tested.
 - `rpc.ts` — RPC shared with the TUI plugin (`recent` method, `classified` event).
 - `tui.tsx` — TUI plugin: renders the last classifications in the sidebar.
+- `package.json` — `exports` map: `.` → `index.ts`, `./tui` → `tui.tsx`.
 
 ## Sidebar
 
@@ -80,14 +128,15 @@ for live updates.
 
 ## Configuration
 
-Registered from `/home/dev/opencode.jsonc`:
+The package name (or a local path) goes in the `plugins` array. Options are
+passed through the object form:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "./opencode-auto-classifier",
+      "package": "github:schemaitat/opencode-auto-classifier",
       "options": {
         "model": "jev-1.13",
         "apiKey": "oc_sk_...",
@@ -179,6 +228,20 @@ jev_classify_command({ "command": "rm -rf ./build" })
   rejected by the zen endpoint (`401 "Invalid API key."`).
 - The DeepSeek fallback is a normal LLM call, so it is slower and consumes the
   fallback model's quota; it only runs after a Jev failure.
+
+## Development
+
+The pure logic is split out so it can be tested without the OpenCode runtime:
+`decide.ts` (thresholds and escalation rules), `format.ts` (sidebar rendering),
+and `jev.ts` (the System One client, tested with an injected `fetch`).
+
+```sh
+npm test          # node --test, no dependencies
+npm run test:watch
+```
+
+Tests use Node's built-in test runner and Node's native TypeScript type
+stripping, so there is nothing to build and no dev dependencies to install.
 
 ## Fallback
 
