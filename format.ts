@@ -32,9 +32,11 @@ export function trim(text: string): string {
   return oneLine.length > RESOURCE_MAX ? oneLine.slice(0, RESOURCE_MAX - 1) + "\u2026" : oneLine
 }
 
-/** Render one sidebar line: `mark action resource (via)`. */
+/** Render one sidebar line: `mark action resource`, plus ` (fallback)` for fallback verdicts. */
 export function line(entry: Entry): string {
-  const suffix = entry.via && entry.via !== "jev" ? ` (${entry.via})` : ""
+  // Only the fallback is flagged: the configured provider is the normal path,
+  // whichever one it is.
+  const suffix = entry.via === "fallback" ? " (fallback)" : ""
   return `${mark(entry.effect)} ${entry.action} ${trim(entry.resource)}${suffix}`
 }
 

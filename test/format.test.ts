@@ -36,9 +36,10 @@ test("line renders mark, action and resource", () => {
   assert.equal(line(entry({ action: "edit", resource: "/etc/passwd", effect: "deny" })), "x edit /etc/passwd")
 })
 
-test("line appends the fallback source but not jev", () => {
+test("line appends the fallback source but not the configured provider", () => {
   assert.equal(line(entry({ via: "fallback" })), ". shell ls (fallback)")
   assert.equal(line(entry({ via: "jev" })), ". shell ls")
+  assert.equal(line(entry({ via: "openrouter" })), ". shell ls")
   assert.equal(line(entry({ via: "" })), ". shell ls")
 })
 
