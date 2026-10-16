@@ -5,6 +5,8 @@
 // server plugin (index.ts) imports these to turn a Jev classification into an
 // OpenCode permission decision.
 
+import type { RuleLists } from "./rules.ts"
+
 export type FailMode = "open" | "closed"
 
 /** Where Jev is served: OpenCode Zen ("jev") or OpenRouter ("openrouter"). */
@@ -13,6 +15,21 @@ export type Provider = "jev" | "openrouter"
 export type ActionThresholds = { risk?: number; destructive?: number; secret?: number }
 
 export type Options = {
+  /**
+   * "classic" (default) keeps the tiered escalator: a triggered threshold
+   * becomes `ask` or `deny`, and the plugin never lowers a decision.
+   * "auto-mode" emulates Claude Code's auto classifier: rules + intent produce
+   * a binary allow/deny, and the classifier may auto-approve.
+   */
+  mode?: "classic" | "auto-mode"
+  /** Rule lists for auto-mode (see rules.ts). "classic" ignores this. */
+  rules?: RuleLists
+  /** How much conversation context auto-mode sends to the classifier. */
+  conversationContext?: "none" | "prompt" | "session"
+  /** auto-mode: route to the LLM fallback when a decision-relevant answer is below this. */
+  confidenceFloor?: number
+  /** auto-mode: stop classifying and resume prompting after this many blocks. */
+  repeatBlocks?: { consecutive?: number; total?: number }
   /** Where Jev is served. Defaults to "jev" (OpenCode Zen). */
   provider?: Provider
   model?: string
@@ -56,7 +73,16 @@ export const PROVIDER_DEFAULTS: Record<Provider, { model: string; endpoint: stri
   },
 }
 
+/** Default repeated-block thresholds for auto-mode (consecutive and total). */
+export const REPEAT_DEFAULTS = { consecutive: 3, total: 20 }
+
 export const DEFAULTS = {
+  mode: "classic" as "classic" | "auto-mode",
+  rules: {} as RuleLists,
+  conversationContext: "prompt" as "none" | "prompt" | "session",
+  confidenceFloor: 0.6,
+  repeatBlocks: { ...REPEAT_DEFAULTS },
+  debug: false,
   provider: "jev" as Provider,
   model: PROVIDER_DEFAULTS.jev.model,
   endpoint: PROVIDER_DEFAULTS.jev.endpoint,
@@ -147,6 +173,10 @@ export function normalize(options: Options): Required<Options> {
   const providerDefaults = PROVIDER_DEFAULTS[merged.provider]
   if (options.model === undefined) merged.model = providerDefaults.model
   if (options.endpoint === undefined) merged.endpoint = providerDefaults.endpoint
+  // Nested options merge over their defaults rather than replacing wholesale.
+  merged.repeatBlocks = { ...DEFAULTS.repeatBlocks, ...(options.repeatBlocks ?? {}) }
+  // auto-mode denies an action it cannot classify unless the user chose otherwise.
+  if (merged.mode === "auto-mode" && options.failMode === undefined) merged.failMode = "closed"
   return merged
 }
 

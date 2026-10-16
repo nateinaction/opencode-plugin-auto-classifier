@@ -3,7 +3,7 @@
 // Kept separate from tui.ts so they can be unit-tested without importing the
 // OpenCode/OpenTUI runtime (solid-js, JSX, @opencode/plugin/tui).
 
-export type Entry = { at: number; action: string; resource: string; effect: string; reason: string; via: string }
+export type Entry = { at: number; action: string; resource: string; effect: string; reason: string; via: string; rule?: string }
 
 export const LIMIT = 10
 export const RESOURCE_MAX = 44
@@ -32,12 +32,13 @@ export function trim(text: string): string {
   return oneLine.length > RESOURCE_MAX ? oneLine.slice(0, RESOURCE_MAX - 1) + "\u2026" : oneLine
 }
 
-/** Render one sidebar line: `mark action resource`, plus ` (fallback)` for fallback verdicts. */
+/** Render one sidebar line: `mark action resource [rule]`, plus ` (fallback)` for fallback verdicts. */
 export function line(entry: Entry): string {
   // Only the fallback is flagged: the configured provider is the normal path,
   // whichever one it is.
   const suffix = entry.via === "fallback" ? " (fallback)" : ""
-  return `${mark(entry.effect)} ${entry.action} ${trim(entry.resource)}${suffix}`
+  const rule = entry.rule ? ` [${entry.rule}]` : ""
+  return `${mark(entry.effect)} ${entry.action} ${trim(entry.resource)}${rule}${suffix}`
 }
 
 /** Pick a colour for an effect, preferring semantic theme tokens. */

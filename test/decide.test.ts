@@ -179,3 +179,11 @@ test("the reason records the classification source", () => {
   assert.match(decide(classify({ destructive: 0.5 }), opts()).reason, /via=jev/)
   assert.match(decide(classify({ destructive: 0.5, source: "fallback" }), opts()).reason, /via=fallback/)
 })
+
+test("auto-mode defaults to fail-closed and merges repeatBlocks over the defaults", () => {
+  assert.equal(normalize({ mode: "auto-mode" }).failMode, "closed")
+  assert.equal(normalize({}).failMode, "open")
+  // An explicit choice wins over the auto-mode default.
+  assert.equal(normalize({ mode: "auto-mode", failMode: "open" }).failMode, "open")
+  assert.deepEqual(normalize({ repeatBlocks: { consecutive: 5 } }).repeatBlocks, { consecutive: 5, total: 20 })
+})

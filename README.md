@@ -21,6 +21,11 @@ would otherwise auto-run can be escalated to a prompt or blocked. Escalations
 are labelled `[auto-classifier] ...` in the permission prompt so their origin is
 unambiguous.
 
+By default the plugin is a **risk escalator**: it only ever raises severity.
+Setting `"mode": "auto-mode"` makes it behave like Claude Code's auto-mode
+classifier instead — rule-based, conversation-aware, and binary allow/deny. See
+[auto-mode](#auto-mode).
+
 ## Installation
 
 The plugin is a normal OpenCode plugin package: the server half is exported at
@@ -103,10 +108,13 @@ Other actions are ignored.
 
 ## Files
 
-- `index.ts` — server plugin: permission hook + `jev_classify_command` tool.
-- `jev.ts` — Jev client (System One request/response, timeouts, abort).
-- `verdict.ts` — LLM fallback prompt and verdict parser, unit-tested.
-- `decide.ts` — pure decision logic (thresholds, escalation, `describe`), unit-tested.
+- `index.ts` — server plugin: permission hook + `jev_classify_command` tool (and `auto_classifier_rules` in auto-mode).
+- `jev.ts` — Jev client (System One request/response, timeouts, abort, classic + auto question sets).
+- `verdict.ts` — LLM fallback prompts and verdict parsers (classic and auto), unit-tested.
+- `decide.ts` — pure decision logic for the classic mode (thresholds, escalation, `describe`), unit-tested.
+- `rules.ts` — auto-mode rule lists, `$defaults` merge, and rule→criteria, unit-tested.
+- `context.ts` — auto-mode state assembly (instructions + request + untrusted action), unit-tested.
+- `auto.ts` — auto-mode decisions: rule precedence, coverage, authority, unit-tested.
 - `format.ts` — pure sidebar formatting helpers, unit-tested.
 - `rpc.ts` — RPC shared with the TUI plugin (`recent` method, `classified` event).
 - `tui.ts` — TUI plugin: renders the last classifications in the sidebar.
@@ -126,8 +134,9 @@ the right sidebar (`sidebar.content`). Each line is colour-coded by effect:
 
 Colours come from the theme's feedback tokens
 (`text.feedback.success/error/warning.base`) with explicit hex fallbacks. Lines
-read `mark action resource`, with `(fallback)` appended when the DeepSeek
-fallback produced the verdict.
+read `mark action resource [rule]`, with `(fallback)` appended when the DeepSeek
+fallback produced the verdict. The `[rule]` tag is the matched auto-mode rule
+(absent in classic mode).
 
 Data flows over `rpc.ts`: the server plugin keeps the last 25 entries and emits
 a `classified` event per decision; the TUI calls `recent` once, then subscribes
@@ -163,6 +172,11 @@ passed through the object form:
 
 | Option             | Default          | Effect                                                        |
 | ------------------ | ---------------- | ------------------------------------------------------------- |
+| `mode`             | `classic`        | `auto-mode` emulates Claude Code's auto classifier (see below) |
+| `rules`            | `{}`             | auto-mode rule lists: `environment`/`allow`/`soft_deny`/`hard_deny` |
+| `conversationContext` | `prompt`      | auto-mode context sent: `none` / `prompt` (request + AGENTS.md) / `session` |
+| `confidenceFloor`  | `0.6`            | auto-mode: below this, an answer routes to the LLM fallback   |
+| `repeatBlocks`     | `{3, 20}`        | auto-mode: consecutive/total blocks before prompting resumes  |
 | `provider`         | `jev`            | where Jev is served: `jev` (OpenCode Zen) or `openrouter`     |
 | `model`            | per provider     | `jev-1.13` (jev) / `typesafe/jev-1.14` (openrouter)           |
 | `endpoint`         | per provider     | Zen System One / OpenRouter Decisions (`/api/alpha/decisions`) |
@@ -201,6 +215,61 @@ destructive, so the edit tool needs a lower threshold to be caught.
   "privilegedAsk": true
 }
 ```
+
+## auto-mode
+
+Set `"mode": "auto-mode"` to behave like Claude Code's auto-mode classifier
+rather than a score escalator. The differences:
+
+- **Binary allow/deny.** The classifier *auto-approves* actions that match no
+  block rule (this is the point of the profile), and denies the rest. It never
+  emits `ask`.
+- **Rule-based.** Config carries Claude Code's four lists — `environment`,
+  `allow`, `soft_deny`, `hard_deny` — as prose entries. Include the literal
+  `"$defaults"` to splice in the built-in set.
+- **Conversation-aware.** The classifier sees your latest request and the
+  project's `AGENTS.md`, so explicit intent clears a soft block and a stated
+  boundary blocks. Tool results are never sent.
+- **Hybrid.** Jev answers a parallel question set over the assembled state; when
+  an answer is below `confidenceFloor`, or Jev fails, the LLM fallback decides.
+
+Precedence (applied in code): `hard_deny` → deny; a stated boundary → deny;
+`soft_deny` → deny unless an `allow` entry matches or you named the action;
+scope escalation → deny; then the severity backstop. Denials are labelled
+`[auto-classifier] [<Rule>] ...`.
+
+Review scope follows Claude Code: `shell`, `webfetch`, `websearch`,
+`external_directory`, and edits **outside** the working directory are
+classified; `read`/`glob`/`grep` and in-project edits are auto-allowed; other
+actions pass through.
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "github:schemaitat/opencode-plugin-auto-classifier",
+      "options": {
+        "mode": "auto-mode",
+        "rules": {
+          "soft_deny": ["$defaults", "Team rule: never modify infra/terraform/prod/"]
+        },
+        "conversationContext": "prompt"
+      }
+    }
+  ]
+}
+```
+
+Two safety behaviors: auto-mode defaults to `failMode: "closed"` (an action it
+cannot classify is denied, matching Claude Code), and a user-configured OpenCode
+`ask` rule is left as a prompt rather than being auto-approved or denied. After
+too many blocks (`repeatBlocks`, default 3 consecutive / 20 total) auto-approval
+pauses so prompts resume.
+
+The tool `auto_classifier_rules` prints the effective, merged rule lists (parity
+with `claude auto-mode defaults`). `denyDestructive`/`denySecret`/`denyRisk`
+become the severity backstop; the `ask*` thresholds, `escalate`, `escalateTo`,
+and `privilegedAsk` are ignored in auto-mode.
 
 ## Tool
 
@@ -247,9 +316,11 @@ jev_classify_command({ "command": "rm -rf ./build" })
 ## Development
 
 The pure logic is split out so it can be tested without the OpenCode runtime:
-`decide.ts` (thresholds and escalation rules), `format.ts` (sidebar rendering),
+`decide.ts` (classic thresholds and escalation rules), `rules.ts` (auto-mode rule
+lists and `$defaults` merge), `context.ts` (auto-mode state assembly), `auto.ts`
+(auto-mode precedence, coverage, and authority), `format.ts` (sidebar rendering),
 `jev.ts` (the System One client, tested with an injected `fetch`), and
-`verdict.ts` (the fallback prompt and parser).
+`verdict.ts` (the fallback prompts and parsers).
 
 ```sh
 npm test          # node --test, no dependencies

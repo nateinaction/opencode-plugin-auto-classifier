@@ -43,6 +43,11 @@ test("line appends the fallback source but not the configured provider", () => {
   assert.equal(line(entry({ via: "" })), ". shell ls")
 })
 
+test("line appends the matched rule when present", () => {
+  assert.equal(line(entry({ resource: "git push --force", effect: "deny", rule: "Git Destructive" })), "x shell git push --force [Git Destructive]")
+  assert.equal(line(entry({ via: "fallback", rule: "Data Exfiltration" })), ". shell ls [Data Exfiltration] (fallback)")
+})
+
 test("colorFor prefers semantic theme tokens", () => {
   const feedback = { success: { base: "#0f0" }, warning: { base: "#fa0" }, error: { base: "#f00" } }
   assert.equal(colorFor("allow", feedback), "#0f0")

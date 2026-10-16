@@ -1,6 +1,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { buildVerdictPrompt, formatAction, parseVerdict, VERDICT_INSTRUCTIONS } from "../verdict.ts"
+import { buildAutoPrompt, buildVerdictPrompt, formatAction, parseAutoVerdict, parseVerdict, VERDICT_INSTRUCTIONS } from "../verdict.ts"
+import { mergeRules } from "../rules.ts"
 
 const VERDICT = {
   category: "vcs",
@@ -57,4 +58,44 @@ test("parseVerdict rejects non-numeric scores, including numeric-looking strings
   for (const bad of [null, "", "0.2", "high", true, [], {}]) {
     assert.throws(() => parseVerdict(JSON.stringify({ ...VERDICT, risk: bad }), "fallback"), /no numeric risk/)
   }
+})
+
+const AUTO_VERDICT = {
+  hard_deny_rule: "none",
+  soft_deny_rule: "Git Destructive",
+  allow_rule: "none",
+  trust_external: 0.2,
+  user_authorizes: 1,
+  user_forbids: 0,
+  scope_escalation: 0,
+  risk: 0.91,
+  destructive: 0.92,
+  secret_exposure: 0.23,
+}
+
+test("buildAutoPrompt lists the rule labels and ends with the classifiable state", () => {
+  const rules = mergeRules({ soft_deny: ["Team Rule: never touch prod"] })
+  const prompt = buildAutoPrompt("STATE-BODY", rules)
+  assert.match(prompt, /hard_deny_rule labels:/)
+  assert.match(prompt, /Team Rule/) // custom rule listed for the model
+  assert.match(prompt, /Data Exfiltration/) // defaults still present
+  assert.ok(prompt.trimEnd().endsWith("STATE-BODY"))
+})
+
+test("parseAutoVerdict maps the full verdict and marks itself confident", () => {
+  const verdict = parseAutoVerdict("```json\n" + JSON.stringify(AUTO_VERDICT) + "\n```", "fallback")
+  assert.equal(verdict.softDenyRule, "Git Destructive")
+  assert.equal(verdict.userAuthorizes, 1)
+  assert.equal(verdict.trustExternal, 0.2)
+  assert.equal(verdict.risk, 0.91)
+  assert.equal(verdict.confidence, 1)
+  assert.equal(verdict.source, "fallback")
+})
+
+test("parseAutoVerdict defaults missing intent signals safely and rejects missing scores", () => {
+  const { user_authorizes: _a, trust_external: _t, ...rest } = AUTO_VERDICT
+  const verdict = parseAutoVerdict(JSON.stringify(rest), "fallback")
+  assert.equal(verdict.userAuthorizes, 0)
+  assert.equal(verdict.trustExternal, 0)
+  assert.throws(() => parseAutoVerdict(JSON.stringify({ ...AUTO_VERDICT, risk: undefined }), "fallback"), /no numeric risk/)
 })

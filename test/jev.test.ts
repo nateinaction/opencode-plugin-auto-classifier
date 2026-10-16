@@ -1,6 +1,13 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { createClassifier, DEFAULT_ENDPOINT, DEFAULT_MODEL } from "../jev.ts"
+import {
+  buildAutoQuestions,
+  createClassifier,
+  DEFAULT_ENDPOINT,
+  DEFAULT_MODEL,
+  parseAutoAnswers,
+} from "../jev.ts"
+import { mergeRules } from "../rules.ts"
 
 type Call = { url: string; init: RequestInit }
 
@@ -236,3 +243,73 @@ test("reads the key from apiKeyEnv and never sends another provider's key", asyn
     }
   }
 })
+
+const AUTO_ANSWERS = {
+  model: "jev-1.13",
+  answers: {
+    hard_deny_rule: { choice: "none", confidence: 0.8, probabilities: { none: 0.8 } },
+    soft_deny_rule: { choice: "Git Destructive", confidence: 0.7, probabilities: { "Git Destructive": 0.7 } },
+    allow_rule: { choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+    trust_external: { noul: 0.1 },
+    user_authorizes: { noul: 0.0 },
+    user_forbids: { noul: 0.0 },
+    scope_escalation: { noul: 0.0 },
+    category: { choice: "vcs", confidence: 0.95, probabilities: { vcs: 0.95 } },
+    risk: { score: 3.64, legend: { "0": "Safe", "4": "Critical" } },
+    destructive: { noul: 0.92 },
+    secret_exposure: { noul: 0.23 },
+  },
+}
+
+test("buildAutoQuestions asks the rule, trust and intent questions", () => {
+  const questions = buildAutoQuestions(mergeRules({ environment: ["$defaults", "Trusted domain: docs.example.com"] }))
+  assert.deepEqual(
+    Object.keys(questions).sort(),
+    [
+      "allow_rule",
+      "category",
+      "destructive",
+      "hard_deny_rule",
+      "risk",
+      "scope_escalation",
+      "secret_exposure",
+      "soft_deny_rule",
+      "trust_external",
+      "user_authorizes",
+      "user_forbids",
+    ].sort(),
+  )
+  assert.equal(questions.hard_deny_rule.type, "choice")
+  assert.equal(questions.trust_external.type, "noul")
+  // The trust boundary is described to the model in the question itself.
+  assert.match(questions.trust_external.instructions, /docs\.example\.com/)
+})
+
+test("answer sends the given questions and returns raw answers", async () => {
+  const c = classifierReturning(AUTO_ANSWERS)
+  const questions = buildAutoQuestions(mergeRules(undefined))
+  const result = await c.cls.answer("assembled state", questions)
+
+  const body = JSON.parse(String(c.lastCall().init.body))
+  assert.equal(body.state, "assembled state")
+  assert.deepEqual(Object.keys(body.questions), Object.keys(questions))
+  assert.equal(result.answers.soft_deny_rule.choice, "Git Destructive")
+})
+
+test("parseAutoAnswers maps the verdict and takes the lowest choice confidence", () => {
+  const verdict = parseAutoAnswers(AUTO_ANSWERS.answers)
+  assert.equal(verdict.risk, 0.91)
+  assert.equal(verdict.destructive, 0.92)
+  assert.equal(verdict.secretExposure, 0.23)
+  assert.equal(verdict.softDenyRule, "Git Destructive")
+  // min(0.8, 0.7, 0.9, 0.95) = 0.7
+  assert.equal(verdict.confidence, 0.7)
+})
+
+test("parseAutoAnswers treats a missing rule choice confidence as inconclusive", () => {
+  const { hard_deny_rule: _drop, ...rest } = AUTO_ANSWERS.answers
+  const verdict = parseAutoAnswers(rest as typeof AUTO_ANSWERS.answers)
+  assert.equal(verdict.hardDenyRule, undefined)
+  assert.equal(verdict.confidence, 0)
+})
+

@@ -1,53 +1,39 @@
-// auto-classifier - classify shell commands with TypeSafe Jev via OpenCode Zen
-// or OpenRouter.
+// auto-classifier - classify actions with TypeSafe Jev via OpenCode Zen or
+// OpenRouter, and fold the verdict into OpenCode's permission decisions.
 //
-// What it does
-//   Every shell command the agent tries to run, plus every file read and edit,
-//   is sent to Jev (a "System One" decision model) which returns a category, a
-//   risk score, and probabilities that the action is destructive or exposes
-//   secrets. The plugin then folds that decision into OpenCode's permission
-//   evaluation: actions that would otherwise auto-run are escalated to `ask`,
-//   and clearly destructive ones are `deny`ed. It also registers a
-//   `jev_classify_command` tool so the model (or a human) can classify any
-//   shell command on demand.
+// Two modes, selected by the `mode` option:
 //
-//   Covered permission actions this way:
-//     shell -> the command text
-//     read  -> "Read the contents of the file at: <path>"
-//     edit  -> "Write to or modify the file at: <path>"  (edit/write/patch)
+//   "classic" (default)
+//     A risk-score escalator. Every shell command, file read, and edit is sent
+//     to Jev for a category, a risk score, and destructive/secret
+//     probabilities; a triggered threshold is escalated to `ask` (or `deny`).
+//     The plugin only ever raises severity.
 //
-// Why Jev and not an LLM
-//   Jev does not generate text. It answers typed questions about the command,
-//   so the result is directly usable and fast (a few hundred milliseconds).
+//   "auto-mode"
+//     Behaves like Claude Code's auto classifier. Jev answers a parallel set of
+//     typed questions over an assembled state (project instructions + the
+//     user's request + the action), covering enumerated rule lists, the trust
+//     boundary, and the user's intent. Precedence is applied in code to produce
+//     a *binary* allow/deny: the classifier auto-approves actions that match no
+//     block rule, and denies the rest. A user-configured `ask` rule stays a
+//     prompt, and repeated blocks pause auto-approval so prompts resume. When a
+//     decision-relevant answer is uncertain (or Jev fails) the LLM fallback
+//     (ctx.generate.text) decides instead.
 //
-// Providers
-//   `provider` selects where Jev is served; both speak the same API:
-//     "jev" (default) -> the System One endpoint on OpenCode Zen.
-//                        Key from OPENCODE_API_KEY.
-//     "openrouter"    -> OpenRouter's Decisions API (alpha).
-//                        Key from OPENROUTER_API_KEY.
+// Covered permission actions: shell, read, edit, webfetch, websearch,
+// external_directory. Auto-mode auto-allows read/glob/grep and in-project
+// edits, and passes other actions through unchanged.
 //
-// Configuration (all optional)
-//   { "plugins": [{ "package": "./opencode-auto-classifier", "options": {
-//       "provider": "jev",            // "jev" (default) or "openrouter"
-//       "model": "jev-1.13",          // paid Jev; defaults per provider
-//       "askRisk": 0.7,                // risk >= this         -> ask
-//       "askDestructive": 0.4,         // destructive >= this  -> ask
-//       "askSecret": 0.8,              // secret exposure >= this -> ask
-//       "denySecret": 1.01,            // secret exposure >= this -> deny (off by default)
-//       "denyDestructive": 0.97,       // destructive >= this  -> deny
-//       "denyRisk": 1.01,              // risk >= this         -> deny (off by default)
-//       "fallbackModel": "opencode-go/deepseek-v4.1-flash", // used when Jev fails
-//       "failMode": "open"             // "open" leaves the decision unchanged on error
-//   } }] }
-//
-// Calls are either the paid Jev model or, on failure, the LLM fallback; the
-// paid model reads its key from the provider's environment variable when no
-// explicit one is set.
+// Providers: `provider` selects where Jev is served; both speak the same API.
+//   "jev" (default) -> https://opencode.ai/zen/v1/systemone (key: OPENCODE_API_KEY)
+//   "openrouter"    -> https://openrouter.ai/api/alpha/decisions (key: OPENROUTER_API_KEY)
 
-import { createClassifier } from "./jev.ts"
+import { readFile } from "node:fs/promises"
+import { isAbsolute, join, resolve, sep } from "node:path"
+
+import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "./jev.ts"
 import { JevClassifierRpc } from "./rpc.ts"
-import { buildVerdictPrompt, parseVerdict } from "./verdict.ts"
+import { buildAutoPrompt, buildVerdictPrompt, parseAutoVerdict, parseVerdict } from "./verdict.ts"
 import {
   decide,
   describe,
@@ -59,12 +45,27 @@ import {
   type Decision,
   type Options,
 } from "./decide.ts"
+import { mergeRules } from "./rules.ts"
+import { buildState } from "./context.ts"
+import type { Entry } from "./format.ts"
+import {
+  autoAuthority,
+  belowConfidence,
+  coverageFor,
+  decideAuto,
+  reachedPause,
+  type AutoDecision,
+  type AutoVerdict,
+} from "./auto.ts"
 
 export default {
   id: "auto-classifier",
 
   async setup(ctx: any) {
     const opts = normalize((ctx.options ?? {}) as Options)
+    const auto = opts.mode === "auto-mode"
+    const rules = mergeRules(opts.rules)
+    const rulesKey = JSON.stringify(rules)
     const classifier = createClassifier({
       model: opts.model,
       endpoint: opts.endpoint,
@@ -78,18 +79,18 @@ export default {
     }
 
     // Rolling record of recent classifications, exposed to the TUI plugin over
-    // RPC so it can render them in the sidebar.
-    type RecentEntry = { at: number; action: string; resource: string; effect: string; reason: string; via: string }
-    const recent: RecentEntry[] = []
+    // RPC so it can render them in the sidebar. The shape is shared with the
+    // TUI's formatter (format.ts) and the RPC schema (rpc.ts).
+    const recent: Entry[] = []
     const RECENT_LIMIT = 25
 
-    let emitClassified: ((entry: RecentEntry) => void) | undefined
+    let emitClassified: ((entry: Entry) => void) | undefined
     if (typeof ctx.rpc?.register === "function") {
       try {
         const registration = await ctx.rpc.register(JevClassifierRpc, {
           recent: async () => ({ entries: recent }),
         })
-        emitClassified = (entry: RecentEntry) => {
+        emitClassified = (entry: Entry) => {
           try {
             void registration.events.emit("classified", entry)
           } catch (error) {
@@ -101,33 +102,26 @@ export default {
       }
     }
 
-    function recordEntry(entry: RecentEntry) {
+    function recordEntry(entry: Entry) {
       recent.unshift(entry)
       if (recent.length > RECENT_LIMIT) recent.length = RECENT_LIMIT
       emitClassified?.(entry)
     }
 
     const cache = new Map<string, { at: number; value: any }>()
+    const autoCache = new Map<string, { at: number; value: AutoVerdict }>()
 
-    // Fallback classifier: when Jev is unavailable (rate limit, timeout, ...),
-    // ask a normal LLM for the same structured verdict as JSON. It runs through
-    // OpenCode's own provider transport (ctx.generate), so it uses whatever
-    // connection/model OpenCode already has instead of needing another key.
-    async function classifyFallback(state: string): Promise<any> {
-      const model = parseModelRef(opts.fallbackModel)
-      const prompt = buildVerdictPrompt(state)
+    // --- fallbacks (shared) --------------------------------------------------
 
+    async function generate(modelRef: string, prompt: string): Promise<string> {
+      const model = parseModelRef(modelRef)
       const result = await ctx.generate.text({ model, prompt })
-      const text: string = result?.text ?? result?.data?.text ?? ""
-
-      return {
-        command: state,
-        model: opts.fallbackModel,
-        source: "fallback",
-        ...parseVerdict(text, "fallback"),
-        categoryConfidence: 0,
-      }
+      return result?.text ?? result?.data?.text ?? ""
     }
+
+    const canFallback = () => opts.fallback && typeof ctx.generate?.text === "function"
+
+    // --- classic classification ---------------------------------------------
 
     async function classify(state: string, signal?: AbortSignal) {
       const hit = cache.get(state)
@@ -139,10 +133,16 @@ export default {
         value = await classifier.classify(state, signal)
         if (value && value.source === undefined) value.source = opts.provider
       } catch (error) {
-        if (!opts.fallback || typeof ctx.generate?.text !== "function") throw error
+        if (!canFallback()) throw error
         log("jev failed; using fallback", opts.fallbackModel, String(error).slice(0, 140))
-        value = await classifyFallback(state)
-        value.fallbackReason = String(error).slice(0, 160)
+        const text = await generate(opts.fallbackModel, buildVerdictPrompt(state))
+        value = {
+          command: state,
+          model: opts.fallbackModel,
+          source: "fallback",
+          ...parseVerdict(text, "fallback"),
+          categoryConfidence: 0,
+        }
       }
 
       if (cache.size > 500) cache.clear()
@@ -150,9 +150,6 @@ export default {
       return value
     }
 
-    // Turn a set of resources into a single decision by taking the most severe
-    // classification across them. `label` is what the model/permission banner
-    // sees; `state` is the text sent to Jev.
     async function classifyAll(
       items: Array<{ label: string; state: string; action: string }>,
       signal?: AbortSignal,
@@ -177,45 +174,305 @@ export default {
       return worst
     }
 
-    // Core wrapper: intercept shell, read, and edit permission evaluations and
-    // fold in Jev's verdict. Hooks run for both `allow` and `ask` decisions, so
-    // an action the user configured to auto-run can still be escalated. We never
-    // lower a decision; an explicit `deny` does not reach the hook at all.
+    // --- auto-mode classification --------------------------------------------
+
+    const autoQuestions = buildAutoQuestions(rules)
+
+    // Per-session context, cached briefly. The user prompt is the intent signal
+    // and does not change within a turn.
+    const promptCache = new Map<string, { at: number; text: string }>()
+    const instructionsCache = new Map<string, { at: number; text: string }>()
+    const PROMPT_TTL = 30_000
+    const INSTRUCTIONS_TTL = 5 * 60_000
+
+    function baseDir(): string {
+      const loc = ctx.location
+      const dir = loc?.directory ?? loc?.worktree ?? loc?.path
+      return typeof dir === "string" && dir ? dir : process.cwd()
+    }
+
+    async function userPrompt(sessionID: string): Promise<string | undefined> {
+      if (!sessionID) return undefined
+      const hit = promptCache.get(sessionID)
+      const now = Date.now()
+      if (hit && now - hit.at < PROMPT_TTL) return hit.text || undefined
+      try {
+        const messages = await ctx.session.context({ sessionID })
+        let text = ""
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const message = messages[i]
+          if (message?.type === "user" && typeof message.text === "string") {
+            text = message.text
+            break
+          }
+        }
+        promptCache.set(sessionID, { at: now, text })
+        return text || undefined
+      } catch (error) {
+        log("session.context failed", String(error))
+        return undefined
+      }
+    }
+
+    async function instructions(): Promise<string | undefined> {
+      const dir = baseDir()
+      const hit = instructionsCache.get(dir)
+      const now = Date.now()
+      if (hit && now - hit.at < INSTRUCTIONS_TTL) return hit.text || undefined
+      for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+        try {
+          const text = await readFile(join(dir, name), "utf8")
+          instructionsCache.set(dir, { at: now, text })
+          return text
+        } catch {
+          // no such file; try the next candidate
+        }
+      }
+      instructionsCache.set(dir, { at: now, text: "" })
+      return undefined
+    }
+
+    // Wider transcript for `conversationContext: "session"`. Only user and
+    // assistant text is included; tool results are never sent.
+    async function sessionTranscript(sessionID: string): Promise<string | undefined> {
+      if (!sessionID) return undefined
+      try {
+        const messages = await ctx.session.context({ sessionID })
+        const lines: string[] = []
+        for (const message of messages.slice(-20)) {
+          const text = messageText(message)
+          if (text) lines.push(`${message?.type ?? "message"}: ${text}`)
+        }
+        return lines.join("\n") || undefined
+      } catch (error) {
+        log("session.context failed", String(error))
+        return undefined
+      }
+    }
+
+    function messageText(message: any): string {
+      if (typeof message?.text === "string") return message.text
+      if (Array.isArray(message?.content)) {
+        return message.content
+          .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+          .map((part: any) => part.text)
+          .join(" ")
+      }
+      return ""
+    }
+
+    function isExternalPath(resource: string): boolean {
+      const base = baseDir()
+      try {
+        const abs = isAbsolute(resource) ? resolve(resource) : resolve(base, resource)
+        return abs !== base && !abs.startsWith(base.endsWith(sep) ? base : base + sep)
+      } catch {
+        return true
+      }
+    }
+
+    async function autoFallback(state: string): Promise<AutoVerdict> {
+      const text = await generate(opts.fallbackModel, buildAutoPrompt(state, rules))
+      return parseAutoVerdict(text, "fallback")
+    }
+
+    async function classifyAuto(state: string, signal?: AbortSignal): Promise<AutoVerdict> {
+      const key = `${rulesKey}\n${state}`
+      const hit = autoCache.get(key)
+      const now = Date.now()
+      if (hit && now - hit.at < opts.cacheTtlMs) return hit.value
+
+      let verdict: AutoVerdict
+      try {
+        const { answers } = await classifier.answer(state, autoQuestions, signal)
+        verdict = parseAutoAnswers(answers)
+        verdict.source = opts.provider
+      } catch (error) {
+        if (!canFallback()) throw error
+        log("jev failed; using fallback", opts.fallbackModel, String(error).slice(0, 140))
+        verdict = await autoFallback(state)
+      }
+
+      // Confidence-gated routing: an inconclusive answer asks the LLM instead.
+      if (belowConfidence(verdict, opts.confidenceFloor)) {
+        if (canFallback()) {
+          try {
+            verdict = await autoFallback(state)
+          } catch (error) {
+            log("low-confidence fallback failed", String(error))
+          }
+        }
+        // Still inconclusive: with fail-closed, an unusable verdict is denied
+        // rather than allowed (mirrors Claude Code's "no verdict" behavior).
+        if (belowConfidence(verdict, opts.confidenceFloor) && opts.failMode === "closed") {
+          throw new Error("auto-classifier: inconclusive verdict; failing closed")
+        }
+      }
+
+      if (autoCache.size > 500) autoCache.clear()
+      autoCache.set(key, { at: now, value: verdict })
+      return verdict
+    }
+
+    async function classifyAutoAll(
+      items: Array<{ label: string; state: string; action: string }>,
+      signal?: AbortSignal,
+    ): Promise<AutoDecision> {
+      let worst: AutoDecision = { effect: "allow", reason: "" }
+      for (const item of items) {
+        const verdict = await classifyAuto(item.state, signal)
+        const decision = decideAuto(verdict, opts, item.action)
+        log(
+          "classified",
+          JSON.stringify({ mode: "auto", resource: item.label, effect: decision.effect, rule: decision.rule }),
+        )
+        recordEntry({
+          at: Date.now(),
+          action: item.action,
+          resource: item.label,
+          effect: decision.effect,
+          reason: decision.reason,
+          via: verdict.source ?? "jev",
+          rule: decision.rule,
+        })
+        if (decision.effect === "deny") return decision
+        worst = decision
+      }
+      return worst
+    }
+
+    // Does OpenCode have a user-configured `ask` rule for this action? If so, an
+    // explicit ask is final and the classifier must not auto-approve or deny it.
+    function matchRule(pattern: unknown, resource: string): boolean {
+      if (pattern === "*") return true
+      if (typeof pattern !== "string") return false
+      if (pattern === resource) return true
+      if (pattern.endsWith("*")) return resource.startsWith(pattern.slice(0, -1))
+      return false
+    }
+
+    async function hasUserAskRule(action: string, resources: string[]): Promise<boolean> {
+      if (typeof ctx.permission?.list !== "function") return false
+      try {
+        const listed = await ctx.permission.list()
+        const rules: any[] = Array.isArray(listed) ? listed : Array.isArray(listed?.rules) ? listed.rules : []
+        return rules.some(
+          (rule) =>
+            rule?.effect === "ask" &&
+            rule?.action === action &&
+            resources.some((resource) => matchRule(rule?.resource, resource)),
+        )
+      } catch (error) {
+        log("permission.list failed", String(error))
+        return false
+      }
+    }
+
+    // Repeated-block accounting: after too many denials, stop auto-approving so
+    // the user is prompted again (mirrors Claude Code's 3-consecutive/20-total).
+    const blocks = new Map<string, { consecutive: number; total: number }>()
+    function blockState(sessionID: string) {
+      return blocks.get(sessionID) ?? { consecutive: 0, total: 0 }
+    }
+
+    // Core wrapper: intercept permission evaluations and fold in the decision.
+    // In classic mode this never lowers a decision; in auto-mode it may
+    // auto-approve, because that is the point of the profile.
     await ctx.permission.hook("evaluate", async (event: any) => {
       const resources: string[] = Array.isArray(event.resources) ? event.resources : []
-      const items = resources
-        .map((resource) => ({ label: resource, action: event.action as string, state: describe(event.action, resource) }))
-        .filter((item): item is { label: string; state: string; action: string } => Boolean(item.state && item.state.trim()))
-      if (items.length === 0) return
+      if (resources.length === 0) return
+      const action = event.action as string
 
-      let decision: Decision
+      if (!auto) {
+        const items = resources
+          .map((resource) => ({ label: resource, action, state: describe(action, resource) }))
+          .filter((item): item is { label: string; state: string; action: string } => Boolean(item.state && item.state.trim()))
+        if (items.length === 0) return
+
+        let decision: Decision
+        try {
+          decision = await classifyAll(items)
+        } catch (error) {
+          log("classification failed", String(error))
+          if (opts.failMode === "closed" && event.effect === "allow") {
+            event.effect = opts.escalateTo
+            event.message = `[auto-classifier] Jev unavailable; failing ${opts.escalateTo}. (${String(error).slice(0, 120)})`
+          }
+          return
+        }
+
+        if (!decision.effect) return
+        if (rank(decision.effect) <= rank(event.effect ?? "allow")) {
+          if (decision.effect === "ask" && event.effect === "ask" && !event.message) {
+            event.message = `[auto-classifier] ${decision.reason}`
+          }
+          return
+        }
+        event.effect = decision.effect
+        event.message = `[auto-classifier] ${decision.reason}`
+        return
+      }
+
+      // --- auto-mode ---
+      const incoming = (event.effect ?? "ask") as "allow" | "ask" | "deny"
+      const external = action === "external_directory" ? true : action === "edit" ? isExternalPath(resources[0]) : false
+      const coverage = coverageFor(action, external)
+      if (coverage === "passthrough") return
+
+      const session = blockState(event.sessionID)
+      const pause = reachedPause(session.consecutive, session.total, opts)
+      // A user ask rule only matters when OpenCode is already prompting.
+      const userAsk = incoming === "ask" ? await hasUserAskRule(action, resources) : false
+
+      if (coverage === "allow") {
+        // Auto-allow read-only tools, but honor a user's ask rule and stop once
+        // repeated blocks have paused auto-approval.
+        if (!userAsk && !pause) event.effect = "allow"
+        return
+      }
+
+      const instructionText = opts.conversationContext === "none" ? undefined : await instructions()
+      const promptText = opts.conversationContext === "none" ? undefined : await userPrompt(event.sessionID)
+      const transcriptText = opts.conversationContext === "session" ? await sessionTranscript(event.sessionID) : undefined
+      const items = resources.map((resource) => ({
+        label: resource,
+        action,
+        state: buildState({
+          mode: opts.conversationContext,
+          instructions: instructionText,
+          userPrompt: promptText,
+          transcript: transcriptText,
+          action,
+          resource,
+        }),
+      }))
+
+      let decision: AutoDecision
       try {
-        decision = await classifyAll(items)
+        decision = await classifyAutoAll(items, event.signal)
       } catch (error) {
-        log("classification failed", String(error))
-        if (opts.failMode === "closed" && event.effect === "allow") {
-          event.effect = opts.escalateTo
-          event.message = `[auto-classifier] Jev unavailable; failing ${opts.escalateTo}. (${String(error).slice(0, 120)})`
+        log("auto classification failed", String(error))
+        if (opts.failMode === "closed" && incoming !== "deny") {
+          event.effect = "deny"
+          event.message = `[auto-classifier] classifier unavailable; failing closed. (${String(error).slice(0, 120)})`
         }
         return
       }
 
-      if (!decision.effect) return
-      if (rank(decision.effect) <= rank(event.effect ?? "allow")) {
-        // Only annotate an already-escalated request.
-        if (decision.effect === "ask" && event.effect === "ask" && !event.message) {
-          event.message = `[auto-classifier] ${decision.reason}`
-        }
-        return
+      const out = autoAuthority(incoming, decision, { userAskRule: userAsk, pausePrompts: pause })
+
+      if (out.effect === "deny") {
+        blocks.set(event.sessionID, { consecutive: session.consecutive + 1, total: session.total + 1 })
+      } else {
+        blocks.set(event.sessionID, { consecutive: 0, total: session.total })
       }
 
-      event.effect = decision.effect
-      event.message = `[auto-classifier] ${decision.reason}`
+      event.effect = out.effect
+      if (out.message) event.message = out.message
     })
 
-    // On-demand classification tool. Useful when the agent wants to reason
-    // about a command before running it, or when a human asks why something
-    // was escalated.
+    // On-demand classification tool (classic verdict). Useful for a human
+    // asking why something was escalated, or for the agent to pre-check.
     await ctx.tool.transform((editor: any) => {
       editor.add({
         name: "jev_classify_command",
@@ -255,6 +512,23 @@ export default {
       })
     })
 
-    log("ready", JSON.stringify({ provider: opts.provider, model: opts.model, failMode: opts.failMode }))
+    // In auto-mode, expose the effective rule set (parity with
+    // `claude auto-mode defaults`) so a human can see what the classifier uses.
+    if (auto) {
+      await ctx.tool.transform((editor: any) => {
+        editor.add({
+          name: "auto_classifier_rules",
+          description:
+            "Print the effective auto-mode rule lists (hard_deny, soft_deny, allow, environment) the classifier is using, with $defaults already merged in.",
+          input: { type: "object", properties: {}, additionalProperties: false },
+          execute: async () => {
+            const body = JSON.stringify(rules, null, 2)
+            return { content: body, metadata: rules }
+          },
+        })
+      })
+    }
+
+    log("ready", JSON.stringify({ mode: opts.mode, provider: opts.provider, model: opts.model, failMode: opts.failMode }))
   },
 }
