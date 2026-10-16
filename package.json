@@ -28,6 +28,7 @@
   "files": [
     "index.ts",
     "jev.ts",
+    "verdict.ts",
     "decide.ts",
     "format.ts",
     "rpc.ts",

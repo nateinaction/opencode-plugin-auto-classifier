@@ -37,7 +37,8 @@
 
 import { createClassifier } from "./jev.ts"
 import { JevClassifierRpc } from "./rpc.ts"
-import { decide, describe, normalize, normalize01, parseModelRef, pct, rank, type Decision, type Options } from "./decide.ts"
+import { buildVerdictPrompt, parseVerdict } from "./verdict.ts"
+import { decide, describe, normalize, parseModelRef, pct, rank, type Decision, type Options } from "./decide.ts"
 
 export default {
   id: "auto-classifier",
@@ -93,32 +94,17 @@ export default {
     // connection/model OpenCode already has instead of needing another key.
     async function classifyFallback(state: string): Promise<any> {
       const model = parseModelRef(opts.fallbackModel)
-      const prompt = [
-        "You are a security classifier for a coding agent. Classify the action below.",
-        "Reply with ONLY minified JSON and no prose, exactly:",
-        '{"category":"read|write|vcs|build|network|process|privileged|other","risk":<0..1>,"destructive":<0..1>,"secret_exposure":<0..1>}',
-        "risk: overall risk (data loss, irreversibility, blast radius, privilege use).",
-        "destructive: probability it irreversibly destroys data or system state.",
-        "secret_exposure: probability it exposes secrets or credentials.",
-        "",
-        `Action: ${state}`,
-      ].join("\n")
+      const prompt = buildVerdictPrompt(state)
 
       const result = await ctx.generate.text({ model, prompt })
       const text: string = result?.text ?? result?.data?.text ?? ""
-      const match = text.match(/\{[\s\S]*\}/)
-      if (!match) throw new Error(`fallback: no JSON in response: ${text.slice(0, 160)}`)
-      const parsed = JSON.parse(match[0])
 
       return {
         command: state,
         model: opts.fallbackModel,
         source: "fallback",
-        category: String(parsed.category ?? "other"),
+        ...parseVerdict(text, "fallback"),
         categoryConfidence: 0,
-        risk: normalize01(parsed.risk),
-        destructive: normalize01(parsed.destructive),
-        secretExposure: normalize01(parsed.secret_exposure ?? parsed.secretExposure),
       }
     }
 

@@ -101,6 +101,7 @@ Other actions are ignored.
 
 - `index.ts` — server plugin: permission hook + `jev_classify_command` tool.
 - `jev.ts` — Jev client (System One request/response, timeouts, abort).
+- `verdict.ts` — LLM fallback prompt and verdict parser, unit-tested.
 - `decide.ts` — pure decision logic (thresholds, escalation, `describe`), unit-tested.
 - `format.ts` — pure sidebar formatting helpers, unit-tested.
 - `rpc.ts` — RPC shared with the TUI plugin (`recent` method, `classified` event).
@@ -236,7 +237,8 @@ jev_classify_command({ "command": "rm -rf ./build" })
 
 The pure logic is split out so it can be tested without the OpenCode runtime:
 `decide.ts` (thresholds and escalation rules), `format.ts` (sidebar rendering),
-and `jev.ts` (the System One client, tested with an injected `fetch`).
+`jev.ts` (the System One client, tested with an injected `fetch`), and
+`verdict.ts` (the fallback prompt and parser).
 
 ```sh
 npm test          # node --test, no dependencies
@@ -254,5 +256,9 @@ paid Jev (System One)  --429/timeout/error-->  ctx.generate.text(fallbackModel)
 
 The fallback prompt asks for strict JSON
 (`{"category":…,"risk":0..1,"destructive":0..1,"secret_exposure":0..1}`), which
-is parsed and fed through the same `decide()` rules. The resulting decision is
+is parsed and fed through the same `decide()` rules. A verdict with a missing
+or non-numeric score counts as a failure, leaving the decision to `failMode`,
+rather than as a score of 0. The action is sent JSON-encoded and marked as
+untrusted data, so text inside a command cannot pose as classifier
+instructions. The resulting decision is
 tagged `via=fallback` so it is visible in debug logs and permission messages.
