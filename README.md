@@ -2,7 +2,9 @@
 
 An OpenCode plugin that wraps every shell command, file read, and file edit in a
 classifier powered by [TypeSafe Jev](https://typesafe.ai) ("System One"), served
-through OpenCode Zen.
+through OpenCode Zen or, with `"provider": "openrouter"`, through
+[OpenRouter](https://openrouter.ai)'s Decisions API. Both serve the same model
+API, so the plugin behaves the same either way.
 
 Before a shell command runs — or a file is read or edited — the plugin sends the
 resource to Jev, which answers typed questions about it:
@@ -58,9 +60,11 @@ paths work too, which is handy for local development:
 
 ### Requirements
 
-- A paid Jev (System One) inference key, or the LLM fallback (see
-  [Configuration](#configuration)). Without a key the plugin fails open by
-  default.
+- A paid Jev (System One) key for the selected provider, or the LLM fallback
+  (see [Configuration](#configuration)): an inference-scoped OpenCode Console
+  key in `OPENCODE_API_KEY` (default `jev` provider), or an OpenRouter key in
+  `OPENROUTER_API_KEY` (`openrouter` provider). Without a key the plugin fails
+  open by default.
 - The TUI sidebar half imports OpenCode's bundled OpenTUI/`solid-js` host
   modules through their runtime ids (`opentui:runtime-module:*`), so it works
   from a `node_modules` install without shipping its own copies. It is optional;
@@ -159,9 +163,10 @@ passed through the object form:
 
 | Option             | Default          | Effect                                                        |
 | ------------------ | ---------------- | ------------------------------------------------------------- |
-| `model`            | `jev-1.13`       | paid Jev model (needs an inference-scoped key)                |
-| `endpoint`         | Zen System One   | `https://opencode.ai/zen/v1/systemone`                        |
-| `apiKey`           | `OPENCODE_API_KEY` | inference-scoped Console key (`oc_sk_...`)                  |
+| `provider`         | `jev`            | where Jev is served: `jev` (OpenCode Zen) or `openrouter`     |
+| `model`            | per provider     | `jev-1.13` (jev) / `typesafe/jev-1.14` (openrouter)           |
+| `endpoint`         | per provider     | Zen System One / OpenRouter Decisions (`/api/alpha/decisions`) |
+| `apiKey`           | per provider     | `OPENCODE_API_KEY` (`oc_sk_...`) / `OPENROUTER_API_KEY`       |
 | `timeoutMs`        | `10000`          | Whole-request timeout                                         |
 | `askRisk`          | `0.7`            | risk >= this -> escalate (`shell` only)                       |
 | `askDestructive`   | `0.4`            | destructive >= this -> escalate                               |
@@ -230,6 +235,12 @@ jev_classify_command({ "command": "rm -rf ./build" })
   as `apiKey` or `OPENCODE_API_KEY`. A key without model permission returns
   `403 "This API key can't call models"`, and the Console OAuth token is
   rejected by the zen endpoint (`401 "Invalid API key."`).
+- With `"provider": "openrouter"`, Jev is called through OpenRouter's Decisions
+  API (`https://openrouter.ai/api/alpha/decisions`) with the same typed
+  questions, using an OpenRouter key from `apiKey` or `OPENROUTER_API_KEY`. Each
+  provider reads only its own key. The Decisions API is an **alpha** endpoint,
+  so its path or shape may change. Set `"model": "~typesafe/jev-latest"` to
+  follow new Jev releases instead of pinning one.
 - The DeepSeek fallback is a normal LLM call, so it is slower and consumes the
   fallback model's quota; it only runs after a Jev failure.
 

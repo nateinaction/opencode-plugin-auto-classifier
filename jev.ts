@@ -1,12 +1,16 @@
-// TypeSafe Jev ("System One") client for the OpenCode Zen endpoint.
+// TypeSafe Jev ("System One") client.
 //
 // Jev is a decision model: you send it a `state` (unstructured text, here a
 // shell command) plus typed `questions`, and it returns typed answers with
 // calibrated probabilities rather than generated text. It is not an LLM and it
 // does not stream.
 //
-// Verified against https://opencode.ai/zen/v1/systemone on 2026-10-11:
-//   jev-1.13       -> requires Authorization: Bearer <inference-scoped key>
+// The same request/response shape is served by two endpoints, selected by the
+// plugin's `provider` option:
+//   jev        -> https://opencode.ai/zen/v1/systemone (OpenCode Zen)
+//                 verified 2026-10-11 with jev-1.13; needs an inference-scoped key
+//   openrouter -> https://openrouter.ai/api/alpha/decisions (OpenRouter Decisions)
+//                 verified 2026-10-15 with typesafe/jev-1.14; needs an OpenRouter key
 // There is deliberately no free-model default: calls are either the paid Jev
 // model (with a key) or, when that fails, the plugin's LLM fallback.
 
@@ -18,8 +22,10 @@ export type JevOptions = {
   model?: string
   /** System One endpoint. Defaults to the OpenCode Zen route. */
   endpoint?: string
-  /** Bearer token. Falls back to OPENCODE_API_KEY, then anonymous. */
+  /** Bearer token. Falls back to the `apiKeyEnv` environment variable, then anonymous. */
   apiKey?: string
+  /** Environment variable read when no apiKey is given. Defaults to "OPENCODE_API_KEY". */
+  apiKeyEnv?: string
   /** Whole-request timeout in milliseconds. Defaults to 10000. */
   timeoutMs?: number
   /** Override fetch (used by tests). Defaults to globalThis.fetch. */
@@ -139,7 +145,7 @@ type FetchLike = typeof fetch
 export function createClassifier(options: JevOptions = {}) {
   const model = options.model ?? DEFAULT_MODEL
   const endpoint = options.endpoint ?? DEFAULT_ENDPOINT
-  const apiKey = options.apiKey ?? process.env.OPENCODE_API_KEY ?? undefined
+  const apiKey = options.apiKey ?? process.env[options.apiKeyEnv ?? "OPENCODE_API_KEY"] ?? undefined
   const timeoutMs = options.timeoutMs ?? 10_000
   const doFetch: FetchLike = options.fetch ?? fetch
 

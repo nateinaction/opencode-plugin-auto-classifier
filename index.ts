@@ -1,4 +1,5 @@
-// auto-classifier - classify shell commands with TypeSafe Jev via OpenCode Zen.
+// auto-classifier - classify shell commands with TypeSafe Jev via OpenCode Zen
+// or OpenRouter.
 //
 // What it does
 //   Every shell command the agent tries to run, plus every file read and edit,
@@ -19,9 +20,17 @@
 //   Jev does not generate text. It answers typed questions about the command,
 //   so the result is directly usable and fast (a few hundred milliseconds).
 //
+// Providers
+//   `provider` selects where Jev is served; both speak the same API:
+//     "jev" (default) -> the System One endpoint on OpenCode Zen.
+//                        Key from OPENCODE_API_KEY.
+//     "openrouter"    -> OpenRouter's Decisions API (alpha).
+//                        Key from OPENROUTER_API_KEY.
+//
 // Configuration (all optional)
 //   { "plugins": [{ "package": "./opencode-auto-classifier", "options": {
-//       "model": "jev-1.13",          // paid Jev (needs an inference key)
+//       "provider": "jev",            // "jev" (default) or "openrouter"
+//       "model": "jev-1.13",          // paid Jev; defaults per provider
 //       "askRisk": 0.7,                // risk >= this         -> ask
 //       "askDestructive": 0.4,         // destructive >= this  -> ask
 //       "askSecret": 0.8,              // secret exposure >= this -> ask
@@ -33,12 +42,23 @@
 //   } }] }
 //
 // Calls are either the paid Jev model or, on failure, the LLM fallback; the
-// paid model reads its key from OPENCODE_API_KEY when no explicit one is set.
+// paid model reads its key from the provider's environment variable when no
+// explicit one is set.
 
 import { createClassifier } from "./jev.ts"
 import { JevClassifierRpc } from "./rpc.ts"
 import { buildVerdictPrompt, parseVerdict } from "./verdict.ts"
-import { decide, describe, normalize, parseModelRef, pct, rank, type Decision, type Options } from "./decide.ts"
+import {
+  decide,
+  describe,
+  normalize,
+  parseModelRef,
+  pct,
+  rank,
+  PROVIDER_DEFAULTS,
+  type Decision,
+  type Options,
+} from "./decide.ts"
 
 export default {
   id: "auto-classifier",
@@ -49,6 +69,7 @@ export default {
       model: opts.model,
       endpoint: opts.endpoint,
       apiKey: opts.apiKey,
+      apiKeyEnv: PROVIDER_DEFAULTS[opts.provider].apiKeyEnv,
       timeoutMs: opts.timeoutMs,
     })
 
@@ -116,7 +137,7 @@ export default {
       let value: any
       try {
         value = await classifier.classify(state, signal)
-        if (value && value.source === undefined) value.source = "jev"
+        if (value && value.source === undefined) value.source = opts.provider
       } catch (error) {
         if (!opts.fallback || typeof ctx.generate?.text !== "function") throw error
         log("jev failed; using fallback", opts.fallbackModel, String(error).slice(0, 140))
@@ -234,6 +255,6 @@ export default {
       })
     })
 
-    log("ready", JSON.stringify({ model: opts.model, failMode: opts.failMode }))
+    log("ready", JSON.stringify({ provider: opts.provider, model: opts.model, failMode: opts.failMode }))
   },
 }

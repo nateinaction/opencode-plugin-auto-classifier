@@ -7,9 +7,14 @@
 
 export type FailMode = "open" | "closed"
 
+/** Where Jev is served: OpenCode Zen ("jev") or OpenRouter ("openrouter"). */
+export type Provider = "jev" | "openrouter"
+
 export type ActionThresholds = { risk?: number; destructive?: number; secret?: number }
 
 export type Options = {
+  /** Where Jev is served. Defaults to "jev" (OpenCode Zen). */
+  provider?: Provider
   model?: string
   endpoint?: string
   apiKey?: string
@@ -36,8 +41,25 @@ export type Decision = {
   reason: string
 }
 
+// Per-provider defaults, so selecting a provider picks its model and endpoint
+// unless the user overrides them. Both providers serve Jev with the same
+// state + typed-questions API: OpenCode Zen's System One endpoint, or
+// OpenRouter's Decisions API (an alpha endpoint, so its path may change).
+// `apiKeyEnv` names the environment variable holding that provider's key, so
+// one provider's key is never sent to the other.
+export const PROVIDER_DEFAULTS: Record<Provider, { model: string; endpoint: string; apiKeyEnv: string }> = {
+  jev: { model: "jev-1.13", endpoint: "https://opencode.ai/zen/v1/systemone", apiKeyEnv: "OPENCODE_API_KEY" },
+  openrouter: {
+    model: "typesafe/jev-1.14",
+    endpoint: "https://openrouter.ai/api/alpha/decisions",
+    apiKeyEnv: "OPENROUTER_API_KEY",
+  },
+}
+
 export const DEFAULTS = {
-  model: "jev-1.13",
+  provider: "jev" as Provider,
+  model: PROVIDER_DEFAULTS.jev.model,
+  endpoint: PROVIDER_DEFAULTS.jev.endpoint,
   timeoutMs: 10_000,
   askRisk: 0.7,
   askDestructive: 0.4,
@@ -119,7 +141,13 @@ export function decide(classification: any, opts: Required<Options>, action = "s
 
 /** Merge user options over the defaults, ignoring explicit `undefined`s. */
 export function normalize(options: Options): Required<Options> {
-  return { ...DEFAULTS, ...Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined)) } as Required<Options>
+  const defined = Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined))
+  const merged = { ...DEFAULTS, ...defined } as Required<Options>
+  // Model and endpoint follow the selected provider unless set explicitly.
+  const providerDefaults = PROVIDER_DEFAULTS[merged.provider]
+  if (options.model === undefined) merged.model = providerDefaults.model
+  if (options.endpoint === undefined) merged.endpoint = providerDefaults.endpoint
+  return merged
 }
 
 export function rank(effect: "allow" | "ask" | "deny"): number {

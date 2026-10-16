@@ -206,3 +206,33 @@ test("throws when a score is missing instead of treating it as safe", async () =
     await assert.rejects(() => c.cls.classify("ls"), new RegExp(`jev: answer has no numeric ${name}`))
   }
 })
+
+test("reads the key from apiKeyEnv and never sends another provider's key", async () => {
+  const previous = { OPENCODE_API_KEY: process.env.OPENCODE_API_KEY, OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY }
+  // createClassifier reads the environment when it is built, so set it first.
+  const authorizationWith = async (routerKey: string | undefined) => {
+    if (routerKey === undefined) delete process.env.OPENROUTER_API_KEY
+    else process.env.OPENROUTER_API_KEY = routerKey
+    let headers: Record<string, string> = {}
+    const cls = createClassifier({
+      apiKeyEnv: "OPENROUTER_API_KEY",
+      fetch: (async (_url: any, options: any) => {
+        headers = options.headers
+        return new Response(JSON.stringify(ANSWER_BODY), { status: 200 })
+      }) as unknown as typeof fetch,
+    })
+    await cls.classify("ls")
+    return headers.Authorization
+  }
+
+  process.env.OPENCODE_API_KEY = "zen-key"
+  try {
+    assert.equal(await authorizationWith("router-key"), "Bearer router-key")
+    assert.equal(await authorizationWith(undefined), undefined)
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
+})

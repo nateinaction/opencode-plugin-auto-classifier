@@ -76,6 +76,23 @@ test("normalize with no options returns the defaults", () => {
   assert.deepEqual(normalize({}), { ...DEFAULTS })
 })
 
+test("normalize defaults to the OpenCode Zen provider", () => {
+  const defaults = normalize({})
+  assert.equal(defaults.provider, "jev")
+  assert.equal(defaults.model, "jev-1.13")
+  assert.equal(defaults.endpoint, "https://opencode.ai/zen/v1/systemone")
+})
+
+test("normalize resolves model and endpoint from the selected provider", () => {
+  const openrouter = normalize({ provider: "openrouter" })
+  assert.equal(openrouter.model, "typesafe/jev-1.14")
+  assert.equal(openrouter.endpoint, "https://openrouter.ai/api/alpha/decisions")
+
+  // An explicit model/endpoint wins over the provider default.
+  assert.equal(normalize({ provider: "openrouter", model: "~typesafe/jev-latest" }).model, "~typesafe/jev-latest")
+  assert.equal(normalize({ provider: "openrouter", endpoint: "https://example.test" }).endpoint, "https://example.test")
+})
+
 test("denies when destructive reaches denyDestructive", () => {
   const d = decide(classify({ destructive: 0.97 }), opts())
   assert.equal(d.effect, "deny")
