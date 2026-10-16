@@ -192,3 +192,17 @@ test("exposes the resolved model and endpoint", () => {
   assert.equal(cls.model, "custom")
   assert.equal(cls.endpoint, "https://example.test")
 })
+
+test("throws when a score is missing instead of treating it as safe", async () => {
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["risk", { risk: { confidence: 0.8 } }],
+    ["destructive", { destructive: undefined }],
+    ["destructive", { destructive: {} }],
+    ["secret_exposure", { secret_exposure: undefined }],
+    ["secret_exposure", { secret_exposure: { noul: "0.1" } }],
+  ]
+  for (const [name, override] of cases) {
+    const c = classifierReturning({ ...ANSWER_BODY, answers: { ...ANSWER_BODY.answers, ...override } })
+    await assert.rejects(() => c.cls.classify("ls"), new RegExp(`jev: answer has no numeric ${name}`))
+  }
+})

@@ -115,6 +115,14 @@ function buildQuestions() {
   }
 }
 
+/** Read one numeric answer; throws when it is missing or not a number. */
+function numeric(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`jev: answer has no numeric ${name}: ${JSON.stringify(value) ?? "undefined"}`)
+  }
+  return value
+}
+
 function clamp01(n: unknown): number {
   const v = typeof n === "number" ? n : Number(n)
   if (!Number.isFinite(v)) return 0
@@ -176,7 +184,11 @@ export function createClassifier(options: JevOptions = {}) {
         throw new Error(`jev: unexpected response shape: ${text.slice(0, 200)}`)
       }
 
-      const risk = clamp01(Number(answers.risk.score) / TOP_RISK_LEVEL)
+      // Missing scores throw rather than defaulting to 0, the safe end of
+      // every scale, so a partial answer fails over instead of allowing.
+      const risk = clamp01(numeric(answers.risk.score, "risk") / TOP_RISK_LEVEL)
+      const destructive = clamp01(numeric(answers.destructive?.noul, "destructive"))
+      const secretExposure = clamp01(numeric(answers.secret_exposure?.noul, "secret_exposure"))
       const riskLegend =
         answers.risk.legend?.[String(Math.round(risk * TOP_RISK_LEVEL))] ?? answers.risk.legend?.["0"]
 
@@ -187,8 +199,8 @@ export function createClassifier(options: JevOptions = {}) {
         categoryConfidence: clamp01(answers.category.confidence),
         risk,
         riskLegend,
-        destructive: clamp01(answers.destructive?.noul),
-        secretExposure: clamp01(answers.secret_exposure?.noul),
+        destructive,
+        secretExposure,
         answers,
         usage: body.usage,
       }
