@@ -84,6 +84,11 @@ const RISK_LEVELS = [
   "Critical: destructive or irreversible (data loss, system damage)",
 ]
 
+// Jev answers a score question on the scale of its criteria indices
+// (0..RISK_LEVELS.length - 1), not 0..1. Dividing by the top index gives the
+// 0..1 risk the decision thresholds expect.
+const TOP_RISK_LEVEL = RISK_LEVELS.length - 1
+
 function buildQuestions() {
   return {
     category: {
@@ -171,16 +176,16 @@ export function createClassifier(options: JevOptions = {}) {
         throw new Error(`jev: unexpected response shape: ${text.slice(0, 200)}`)
       }
 
+      const risk = clamp01(Number(answers.risk.score) / TOP_RISK_LEVEL)
       const riskLegend =
-        answers.risk.legend?.[String(Math.round(clamp01(answers.risk.score) * 4))] ??
-        answers.risk.legend?.["0"]
+        answers.risk.legend?.[String(Math.round(risk * TOP_RISK_LEVEL))] ?? answers.risk.legend?.["0"]
 
       return {
         command: state,
         model: body.model ?? model,
         category: answers.category.choice,
         categoryConfidence: clamp01(answers.category.confidence),
-        risk: clamp01(answers.risk.score),
+        risk,
         riskLegend,
         destructive: clamp01(answers.destructive?.noul),
         secretExposure: clamp01(answers.secret_exposure?.noul),

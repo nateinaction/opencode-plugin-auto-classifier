@@ -24,7 +24,8 @@ const ANSWER_BODY = {
   usage: { total_tokens: 12 },
   answers: {
     category: { choice: "vcs", confidence: 0.93, probabilities: { vcs: 0.93, other: 0.07 } },
-    risk: { score: 0.91, confidence: 0.8, legend: { "0": "Safe", "4": "Critical" } },
+    // Score is on the 0..4 risk-level scale; 3.64 / 4 = 0.91.
+    risk: { score: 3.64, confidence: 0.8, legend: { "0": "Safe", "4": "Critical" } },
     destructive: { noul: 0.92 },
     secret_exposure: { noul: 0.23 },
   },
@@ -106,14 +107,26 @@ test("parses a well-formed response into a Classification", async () => {
 
 test("maps the risk score onto the legend band", async () => {
   const c = classifierReturning(ANSWER_BODY)
-  // 0.91 * 4 rounds to 4 -> "Critical".
+  // Level 3.64 rounds to 4 -> "Critical".
   assert.equal((await c.cls.classify("x")).riskLegend, "Critical")
 
   const low = classifierReturning({
     ...ANSWER_BODY,
-    answers: { ...ANSWER_BODY.answers, risk: { score: 0.1, legend: { "0": "Safe", "4": "Critical" } } },
+    answers: { ...ANSWER_BODY.answers, risk: { score: 0.4, legend: { "0": "Safe", "4": "Critical" } } },
   })
   assert.equal((await low.cls.classify("x")).riskLegend, "Safe")
+})
+
+test("normalizes the risk level to 0..1 rather than clamping it", async () => {
+  // Jev 1.14 answered 1.84 ("Moderate") for a source-file edit; clamping read
+  // that as maximum risk.
+  const c = classifierReturning({
+    ...ANSWER_BODY,
+    answers: { ...ANSWER_BODY.answers, risk: { score: 1.84, legend: { "0": "Safe", "2": "Moderate", "4": "Critical" } } },
+  })
+  const result = await c.cls.classify("x")
+  assert.equal(result.risk, 0.46)
+  assert.equal(result.riskLegend, "Moderate")
 })
 
 test("clamps out-of-range scores", async () => {
