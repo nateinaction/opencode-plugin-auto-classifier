@@ -234,9 +234,10 @@ rather than a score escalator. The differences:
 - **Rule-based.** Config carries Claude Code's four lists — `environment`,
   `allow`, `soft_deny`, `hard_deny` — as prose entries. Include the literal
   `"$defaults"` to splice in the built-in set.
-- **Conversation-aware.** The classifier sees your latest request and the
-  project's `AGENTS.md`, so explicit intent clears a soft block and a stated
-  boundary blocks. Tool results are never sent.
+- **Conversation-aware.** The classifier sees your last three messages, the
+  project's `AGENTS.md`, and the working directory, so explicit intent clears a
+  soft block and a stated boundary blocks. Assistant text and tool results are
+  never sent.
 - **Hybrid.** Jev answers a parallel question set over the assembled state; when
   an answer is below `confidenceFloor`, a yes/no signal near 50% could flip
   allow vs deny, or Jev fails, the LLM fallback decides. A near-50% signal that
@@ -251,6 +252,72 @@ for an action that is also destructive or may expose secrets (a terse request
 like `@skill 125` never names the harmless commands an agent runs for it); then
 the severity backstop. Denials are labelled
 `[auto-classifier] [<Rule>] ...`.
+
+### Decision flow
+
+Each classified action is one Jev request carrying eleven typed questions,
+answered in parallel. Jev has three question types: `choice` picks one key from
+a set of criteria and reports a confidence; `noul` answers yes/no as a 0–1
+probability; `score` places the answer on an ordered scale.
+
+| Question | Type | Decides |
+| --- | --- | --- |
+| `hard_deny_rule` | choice | a matched `hard_deny` rule denies |
+| `user_forbids` | noul | ≥ 0.5 denies as `User Boundary` |
+| `soft_deny_rule` | choice | a matched `soft_deny` rule denies unless cleared |
+| `allow_rule` | choice | a matched `allow` exception clears a soft rule |
+| `user_authorizes` | noul | ≥ 0.5 clears a soft rule |
+| `destructive` | noul | ≥ 0.5 makes the action sensitive; ≥ `denyDestructive` denies |
+| `secret_exposure` | noul | ≥ 0.5 makes the action sensitive; ≥ `denySecret` denies |
+| `scope_escalation` | noul | ≥ 0.5 on a sensitive action denies |
+| `trust_external` | noul | ≥ 0.5 on a sensitive action denies |
+| `risk` | score | ≥ `denyRisk` denies a shell command |
+| `category` | choice | logged only |
+
+```mermaid
+flowchart TD
+    req["Permission request"] --> cov{"Action kind"}
+    cov -- "read, glob, grep, edit inside the project" --> autoAllow["Allow"]
+    cov -- "subagent, MCP, skill, question" --> pass["Pass through unchanged"]
+    cov -- "shell, webfetch, websearch, external_directory, edit outside the project" --> state["Build state: PROJECT INSTRUCTIONS, EARLIER USER REQUESTS, USER REQUEST, ENVIRONMENT, ACTION"]
+    state --> cached{"Verdict cached?"}
+    cached -- yes --> hard
+    cached -- no --> jev["Jev: 11 typed questions in one request"]
+    jev -- "HTTP error, timeout, or missing score" --> fbError["LLM fallback"]
+    fbError -- "fails or disabled, failMode closed" --> deny
+    fbError -- "fails or disabled, failMode open" --> opencode["OpenCode's own decision"]
+    fbError -- verdict --> conf
+    jev -- answers --> conf{"Inconclusive? An unsure choice below confidenceFloor, or a noul within 0.4–0.6, that could flip allow and deny"}
+    conf -- no --> hard
+    conf -- yes --> fbLow["LLM fallback"]
+    fbLow --> still{"Still inconclusive?"}
+    still -- "no, or yes with failMode open" --> hard
+    still -- "yes, failMode closed" --> deny
+
+    hard{"hard_deny_rule (choice) matched?"} -- yes --> deny
+    hard -- no --> forbids{"user_forbids (noul) ≥ 0.5?"}
+    forbids -- "yes: User Boundary" --> deny
+    forbids -- no --> soft{"soft_deny_rule (choice) matched?"}
+    soft -- yes --> cleared{"allow_rule (choice) matched, or user_authorizes (noul) ≥ 0.5?"}
+    cleared -- no --> deny
+    cleared -- yes --> sensitive
+    soft -- no --> sensitive{"Sensitive? destructive (noul) or secret_exposure (noul) ≥ 0.5"}
+    sensitive -- yes --> scope{"scope_escalation (noul) ≥ 0.5?"}
+    scope -- "yes: Scope Escalation" --> deny
+    scope -- no --> external{"trust_external (noul) ≥ 0.5?"}
+    external -- "yes: External" --> deny
+    external -- no --> backstop
+    sensitive -- no --> backstop{"Backstop: destructive ≥ denyDestructive, secret_exposure ≥ denySecret, or risk (score) ≥ denyRisk?"}
+    backstop -- yes --> deny
+    backstop -- no --> allow["Allow"]
+
+    deny["Deny: [auto-classifier] [Rule] reason"]
+```
+
+An allow is written back as `allow` unless you have an OpenCode `ask` rule for
+the action, which stays a prompt, or repeated blocks have paused auto-approval.
+`denySecret` and `denyRisk` default to `1.01`, so those backstops are off unless
+configured.
 
 Review scope follows Claude Code: `shell`, `webfetch`, `websearch`,
 `external_directory`, and edits **outside** the working directory are
