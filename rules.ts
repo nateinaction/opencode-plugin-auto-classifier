@@ -61,7 +61,7 @@ export const DEFAULT_RULES: Required<RuleLists> = {
     "Regenerable Cleanup: Deleting build output, caches, and temporary files that tools regenerate (dist, build, __pycache__, *.pyc, node_modules, files in the system temp directory).",
   ],
   environment: [
-    "Trusted repo: the repository the session started in (its working directory) and its configured remotes.",
+    "Trusted repo: the repository the session started in (its working directory) and its configured remotes, including each remote's hosted project: its issues, pull requests, and releases.",
   ],
 }
 
