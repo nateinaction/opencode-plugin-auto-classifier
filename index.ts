@@ -410,6 +410,25 @@ export default {
       }
     }
 
+    // Whole shell commands by tool-call ID. OpenCode asks permission for each
+    // part of a compound command separately and can drop a heredoc from its
+    // part (`python3 - "$f" <<'PY'` arrives as `python3 - "$f"`), so the
+    // classifier would judge a script it cannot see. `execute.before` runs
+    // before the tool asks, and the permission event's `source.id` names the
+    // same call. Bounded because a call that never completes is never removed.
+    const shellCommands = new Map<string, string>()
+    const SHELL_COMMAND_LIMIT = 64
+    await ctx.tool.hook("execute.before", (event: any) => {
+      const command = event?.input?.command
+      if (event?.tool !== "shell" || typeof event.id !== "string" || typeof command !== "string") return
+      shellCommands.delete(event.id)
+      shellCommands.set(event.id, command)
+      if (shellCommands.size > SHELL_COMMAND_LIMIT) shellCommands.delete(shellCommands.keys().next().value!)
+    })
+    await ctx.tool.hook("execute.after", (event: any) => {
+      if (typeof event?.id === "string") shellCommands.delete(event.id)
+    })
+
     // Repeated-block accounting: after too many denials, stop auto-approving so
     // the user is prompted again (mirrors Claude Code's 3-consecutive/20-total).
     const blocks = new Map<string, { consecutive: number; total: number }>()
@@ -478,6 +497,7 @@ export default {
       const promptText = prompts.at(-1)
       const earlierPrompts = prompts.slice(0, -1).map((text) => text.slice(0, EARLIER_PROMPT_CHARS))
       const transcriptText = opts.conversationContext === "session" ? await sessionTranscript(event.sessionID) : undefined
+      const command = action === "shell" && event.source?.type === "tool" ? shellCommands.get(event.source.id) : undefined
       const items = resources.map((resource) => ({
         label: resource,
         action,
@@ -489,6 +509,7 @@ export default {
           transcript: transcriptText,
           action,
           resource,
+          command,
           directory: baseDir(),
         }),
       }))
