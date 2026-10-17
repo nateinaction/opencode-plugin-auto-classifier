@@ -33,6 +33,7 @@ import { isAbsolute, join, resolve, sep } from "node:path"
 
 import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "./jev.ts"
 import { JevClassifierRpc } from "./rpc.ts"
+import { buildLabel, commitFromLock } from "./build.ts"
 import { buildAutoPrompt, buildVerdictPrompt, parseAutoVerdict, parseVerdict } from "./verdict.ts"
 import {
   decide,
@@ -102,10 +103,29 @@ export default {
       }
     }
 
+    const build = await readBuild()
     function recordEntry(entry: Entry) {
-      recent.unshift(entry)
+      const stamped: Entry = { ...entry, mode: opts.mode, build }
+      recent.unshift(stamped)
       if (recent.length > RECENT_LIMIT) recent.length = RECENT_LIMIT
-      emitClassified?.(entry)
+      emitClassified?.(stamped)
+    }
+
+    // Which install is running: the commit npm resolved (from the installer's
+    // lockfile beside this package), else the package version.
+    async function readBuild(): Promise<string> {
+      const json = async (relative: string): Promise<unknown> => {
+        try {
+          return JSON.parse(await readFile(new URL(relative, import.meta.url), "utf8"))
+        } catch (error) {
+          // Expected for a local checkout, which has no installer lockfile.
+          log("build metadata unavailable", relative, String(error))
+          return undefined
+        }
+      }
+      const pkg = (await json("./package.json")) as { name?: unknown; version?: unknown } | undefined
+      const name = typeof pkg?.name === "string" ? pkg.name : "opencode-plugin-auto-classifier"
+      return buildLabel(commitFromLock(await json("../.package-lock.json"), name), pkg?.version)
     }
 
     const cache = new Map<string, { at: number; value: any }>()

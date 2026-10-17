@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { colorFor, GREEN, line, mark, ORANGE, RED, RESOURCE_MAX, trim, type Entry } from "../format.ts"
+import { colorFor, GREEN, line, mark, ORANGE, RED, RESOURCE_MAX, stamp, trim, type Entry } from "../format.ts"
 
 function entry(over: Partial<Entry> = {}): Entry {
   return { at: 0, action: "shell", resource: "ls", effect: "allow", reason: "", via: "jev", ...over }
@@ -46,6 +46,21 @@ test("line appends the fallback source but not the configured provider", () => {
 test("line appends the matched rule when present", () => {
   assert.equal(line(entry({ resource: "git push --force", effect: "deny", rule: "Git Destructive" })), "x shell git push --force [Git Destructive]")
   assert.equal(line(entry({ via: "fallback", rule: "Data Exfiltration" })), ". shell ls [Data Exfiltration] (fallback)")
+})
+
+test("stamp joins mode and build, or keeps whichever is known", () => {
+  assert.equal(stamp(entry({ mode: "auto-mode", build: "631a3b9" })), "auto-mode@631a3b9")
+  assert.equal(stamp(entry({ mode: "classic" })), "classic")
+  assert.equal(stamp(entry({ build: "v0.1.1" })), "v0.1.1")
+  assert.equal(stamp(entry()), "")
+})
+
+test("line ends with the mode@build stamp when present", () => {
+  assert.equal(line(entry({ mode: "classic", build: "5d24e63", effect: "ask" })), "? shell ls {classic@5d24e63}")
+  assert.equal(
+    line(entry({ via: "fallback", rule: "Git Destructive", effect: "deny", mode: "auto-mode", build: "631a3b9" })),
+    "x shell ls [Git Destructive] (fallback) {auto-mode@631a3b9}",
+  )
 })
 
 test("colorFor prefers semantic theme tokens", () => {

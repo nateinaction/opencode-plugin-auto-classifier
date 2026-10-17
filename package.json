@@ -34,6 +34,7 @@
     "context.ts",
     "auto.ts",
     "format.ts",
+    "build.ts",
     "rpc.ts",
     "tui.ts",
     "virtual-modules.d.ts",

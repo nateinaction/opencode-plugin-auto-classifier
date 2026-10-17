@@ -116,6 +116,7 @@ Other actions are ignored.
 - `context.ts` — auto-mode state assembly (instructions + request + untrusted action), unit-tested.
 - `auto.ts` — auto-mode decisions: rule precedence, coverage, authority, unit-tested.
 - `format.ts` — pure sidebar formatting helpers, unit-tested.
+- `build.ts` — identifies the running build (installed commit or version) for the sidebar stamp, unit-tested.
 - `rpc.ts` — RPC shared with the TUI plugin (`recent` method, `classified` event).
 - `tui.ts` — TUI plugin: renders the last classifications in the sidebar.
 - `virtual-modules.d.ts` — ambient types for the `opentui:runtime-module:*` host ids.
@@ -136,7 +137,12 @@ Colours come from the theme's feedback tokens
 (`text.feedback.success/error/warning.base`) with explicit hex fallbacks. Lines
 read `mark action resource [rule]`, with `(fallback)` appended when the DeepSeek
 fallback produced the verdict. The `[rule]` tag is the matched auto-mode rule
-(absent in classic mode).
+(absent in classic mode). Every line ends with `{mode@build}`, e.g.
+`{auto-mode@631a3b9}`: the mode and the installed commit (or `v<version>` for a
+local checkout) of the plugin instance that decided. A long-running
+`opencode serve` can hold instances from several installs at once, so this
+shows which one produced each verdict; a line with no stamp came from a build
+older than the stamp itself.
 
 Data flows over `rpc.ts`: the server plugin keeps the last 25 entries and emits
 a `classified` event per decision; the TUI calls `recent` once, then subscribes

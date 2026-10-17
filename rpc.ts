@@ -16,6 +16,8 @@ const entrySchema = {
     reason: { type: "string" },
     via: { type: "string" },
     rule: { type: "string" },
+    mode: { type: "string" },
+    build: { type: "string" },
   },
   required: ["at", "action", "resource", "effect", "reason", "via"],
   additionalProperties: false,
