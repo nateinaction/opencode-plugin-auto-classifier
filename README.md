@@ -181,7 +181,8 @@ passed through the object form:
 | `mode`             | `classic`        | `auto-mode` emulates Claude Code's auto classifier (see below) |
 | `rules`            | `{}`             | auto-mode rule lists: `environment`/`allow`/`soft_deny`/`hard_deny` |
 | `conversationContext` | `prompt`      | auto-mode context sent: `none` / `prompt` (last 3 user messages + AGENTS.md) / `session` |
-| `confidenceFloor`  | `0.6`            | auto-mode: below this, an answer routes to the LLM fallback   |
+| `confidenceFloor`  | `0.6`            | auto-mode: below this, an answer is uncertain (see `onUncertain`) |
+| `onUncertain`      | `fallback`       | auto-mode: an uncertain Jev verdict goes to the LLM fallback (`fallback`), decides on Jev's own answers (`accept`), or is denied as `Uncertain` (`deny`); an unknown value denies |
 | `repeatBlocks`     | `{3, 20}`        | auto-mode: consecutive/total blocks before prompting resumes  |
 | `provider`         | `jev`            | where Jev is served: `jev` (OpenCode Zen) or `openrouter`     |
 | `model`            | per provider     | `jev-1.13` (jev) / `typesafe/jev-1.14` (openrouter)           |
@@ -235,15 +236,22 @@ rather than a score escalator. The differences:
   `allow`, `soft_deny`, `hard_deny` — as prose entries. Include the literal
   `"$defaults"` to splice in the built-in set.
 - **Conversation-aware.** The classifier sees your last three messages, the
-  project's `AGENTS.md`, and the working directory, so explicit intent clears a
-  soft block and a stated boundary blocks. Assistant text and tool results are
-  never sent.
-- **Hybrid.** Jev answers a parallel question set over the assembled state; when
-  an answer is below `confidenceFloor`, a yes/no signal near 50% could flip
-  allow vs deny, or Jev fails, the LLM fallback decides. A near-50% signal that
-  cannot change the outcome (e.g. "did the user authorize this?" when no soft
-  rule matched) is ignored. If the fallback is still inconclusive, the action
-  is denied.
+  project's `AGENTS.md`, the working directory, and OpenCode's scratch
+  directory (`$TMPDIR/opencode`, trusted like the repo, since the agent keeps
+  working copies and worktrees there), so explicit intent clears a soft block
+  and a stated boundary blocks. Assistant text and tool results are never sent.
+- **Hybrid.** Jev answers a parallel question set over the assembled state.
+  When Jev fails, the LLM fallback decides. When Jev's verdict is uncertain (an
+  answer below `confidenceFloor`, or a yes/no signal near 50%, that could flip
+  allow vs deny), `onUncertain` decides: the LLM fallback (the default), Jev's
+  own answers (`accept`), or a denial (`deny`). A near-50% signal that cannot
+  change the outcome (e.g. "did the user authorize this?" when no soft rule
+  matched) is not uncertain. Jev's uncertain verdict is written to the debug
+  log either way. If the fallback is still inconclusive, the action is denied.
+  The fallback takes seconds to a minute per call, and on borderline actions
+  it can answer the same input differently from one call to the next; compare
+  the policies with `npm run eval` (Jev, with a per-policy tally) and
+  `npm run eval:fallback` (repeated fallback samples).
 
 Precedence (applied in code): `hard_deny` → deny; a stated boundary → deny;
 `soft_deny` → deny unless an `allow` entry matches or you named the action;
@@ -289,7 +297,9 @@ flowchart TD
     fbError -- verdict --> conf
     jev -- answers --> conf{"Inconclusive? An unsure choice below confidenceFloor, or a noul within 0.4–0.6, that could flip allow and deny"}
     conf -- no --> hard
-    conf -- yes --> fbLow["LLM fallback"]
+    conf -- "yes, onUncertain accept" --> hard
+    conf -- "yes, onUncertain deny: Uncertain" --> deny
+    conf -- "yes, onUncertain fallback" --> fbLow["LLM fallback"]
     fbLow --> still{"Still inconclusive?"}
     still -- "no, or yes with failMode open" --> hard
     still -- "yes, failMode closed" --> deny
@@ -393,7 +403,8 @@ jev_classify_command({ "command": "rm -rf ./build" })
   so its path or shape may change. Set `"model": "~typesafe/jev-latest"` to
   follow new Jev releases instead of pinning one.
 - The DeepSeek fallback is a normal LLM call, so it is slower and consumes the
-  fallback model's quota; it only runs after a Jev failure.
+  fallback model's quota; it only runs after a Jev failure or, with
+  `onUncertain: "fallback"`, an uncertain auto-mode verdict.
 
 ## Development
 
