@@ -10,6 +10,7 @@
 // Side-effect free, so it is unit-testable without the OpenCode runtime.
 
 import { pct, REPEAT_DEFAULTS, type Options } from "./decide.ts"
+import { NONE } from "./rules.ts"
 
 export type AutoVerdict = {
   category?: string
@@ -144,30 +145,49 @@ const RESTRICTIVE_SIGNALS = ["trustExternal", "userForbids", "scopeEscalation"] 
 
 const ambiguous = (prob: number): boolean => Math.abs(prob - INTENT_THRESHOLD) < AMBIGUOUS_BAND
 
-/** The verdict with each ambiguous signal settled at its most permissive (`lenient`) or most restrictive end. */
-function settle(verdict: AutoVerdict, lenient: boolean): AutoVerdict {
+/** Stands in for "some rule matched" when a rule choice is settled at its restrictive end. */
+const UNSURE_RULE = "Unsure"
+
+/**
+ * The verdict with each ambiguous signal, and each rule choice below `floor`,
+ * settled at its most permissive (`lenient`) or most restrictive end. A hard or
+ * soft rule is permissive as "none"; an allow exception is permissive as matched.
+ */
+function settle(verdict: AutoVerdict, lenient: boolean, floor: number): AutoVerdict {
   const settled = { ...verdict }
   for (const key of PERMISSIVE_SIGNALS) if (ambiguous(verdict[key])) settled[key] = lenient ? 1 : 0
   for (const key of RESTRICTIVE_SIGNALS) if (ambiguous(verdict[key])) settled[key] = lenient ? 0 : 1
+  const choices = verdict.choiceConfidence
+  if (choices) {
+    // A missing confidence is unsure, so it is settled both ways like a low one.
+    const unsure = (question: string): boolean => !((choices[question] ?? 0) >= floor)
+    if (unsure("hard_deny_rule")) settled.hardDenyRule = lenient ? NONE : UNSURE_RULE
+    if (unsure("soft_deny_rule")) settled.softDenyRule = lenient ? NONE : UNSURE_RULE
+    if (unsure("allow_rule")) settled.allowRule = lenient ? UNSURE_RULE : NONE
+  }
   return settled
 }
 
 /**
- * True when a decision-relevant answer is too uncertain to act on: either the
- * choice confidence is below `floor`, or an intent/trust signal within the
- * ambiguous band around its threshold could flip the decision (Jev's yes/no
- * answers carry no confidence of their own).
+ * True when a decision-relevant answer is too uncertain to act on: a rule
+ * choice below `floor`, or an intent/trust signal within the ambiguous band
+ * around its threshold (Jev's yes/no answers carry no confidence of their
+ * own), that could flip the decision.
  *
- * `decideAuto` is monotone in every signal, so settling all ambiguous signals
+ * `decideAuto` is monotone in every answer, so settling all uncertain answers
  * at their most permissive and most restrictive ends bounds every combination:
- * if both ends decide alike, the ambiguity is irrelevant. A model answering 0.5
- * for "not applicable" (e.g. user_authorizes when no soft rule matched) no
- * longer fails the action closed.
+ * if both ends decide alike, the uncertainty is irrelevant. A model answering
+ * 0.5 for "not applicable" (e.g. user_authorizes when no soft rule matched), or
+ * hesitating over a hard rule when a confident soft rule already denies, no
+ * longer routes the action to the fallback.
+ *
+ * A verdict without per-choice confidences (the LLM fallback's) is judged by
+ * its overall confidence alone.
  */
 export function belowConfidence(verdict: AutoVerdict, floor: number, opts: Required<Options>, action = "shell"): boolean {
-  if (!(verdict.confidence >= floor)) return true
-  const lenient = decideAuto(settle(verdict, true), opts, action).effect
-  const strict = decideAuto(settle(verdict, false), opts, action).effect
+  if (!verdict.choiceConfidence && !(verdict.confidence >= floor)) return true
+  const lenient = decideAuto(settle(verdict, true, floor), opts, action).effect
+  const strict = decideAuto(settle(verdict, false, floor), opts, action).effect
   return lenient !== strict
 }
 

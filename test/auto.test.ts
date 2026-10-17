@@ -152,6 +152,35 @@ test("belowConfidence ignores near-threshold signals that cannot change the deci
   assert.equal(belowConfidence(verdict({ hardDenyRule: "Data Exfiltration", userForbids: 0.5, userAuthorizes: 0.5 }), 0.6, opts()), false)
 })
 
+test("belowConfidence ignores an unsure hard rule when a confident soft rule already denies", () => {
+  // `cat ~/.aws/credentials`: Credential Printing is certain, Data Exfiltration is not.
+  const v = verdict({
+    softDenyRule: "Credential Printing",
+    confidence: 0.38,
+    choiceConfidence: { hard_deny_rule: 0.38, soft_deny_rule: 0.99, allow_rule: 0.97 },
+  })
+  assert.equal(decideAuto(v, opts()).effect, "deny")
+  assert.equal(belowConfidence(v, 0.6, opts()), false)
+})
+
+test("belowConfidence keeps an unsure rule choice that could flip the decision", () => {
+  // An unsure hard rule on an otherwise clean action decides allow vs deny.
+  const hard = { hard_deny_rule: 0.4, soft_deny_rule: 0.99, allow_rule: 0.99 }
+  assert.equal(belowConfidence(verdict({ confidence: 0.4, choiceConfidence: hard }), 0.6, opts()), true)
+  // An unsure soft rule matters when no exception would clear it.
+  const soft = { hard_deny_rule: 0.99, soft_deny_rule: 0.4, allow_rule: 0.99 }
+  assert.equal(belowConfidence(verdict({ softDenyRule: "Git Destructive", confidence: 0.4, choiceConfidence: soft }), 0.6, opts()), true)
+  // An unsure allow exception matters once a soft rule matched.
+  const allow = { hard_deny_rule: 0.99, soft_deny_rule: 0.99, allow_rule: 0.4 }
+  assert.equal(belowConfidence(verdict({ softDenyRule: "Git Destructive", allowRule: "Local Operations", confidence: 0.4, choiceConfidence: allow }), 0.6, opts()), true)
+  // A missing choice confidence is unsure, not certain.
+  assert.equal(belowConfidence(verdict({ confidence: 0.99, choiceConfidence: {} }), 0.6, opts()), true)
+})
+
+test("belowConfidence judges a verdict without per-choice confidences by its overall confidence", () => {
+  assert.equal(belowConfidence(verdict({ softDenyRule: "Credential Printing", confidence: 0.4 }), 0.6, opts()), true)
+})
+
 test("authority never lowers an explicit deny", () => {
   const out = autoAuthority("deny", { effect: "allow", reason: "x" }, { userAskRule: false, pausePrompts: false })
   assert.equal(out.effect, "deny")
