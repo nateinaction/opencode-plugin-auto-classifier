@@ -267,11 +267,11 @@ probability; `score` places the answer on an ordered scale.
 | `soft_deny_rule` | choice | a matched `soft_deny` rule denies unless cleared |
 | `allow_rule` | choice | a matched `allow` exception clears a soft rule |
 | `user_authorizes` | noul | ≥ 0.5 clears a soft rule |
-| `destructive` | noul | ≥ 0.5 makes the action sensitive; ≥ `denyDestructive` denies |
-| `secret_exposure` | noul | ≥ 0.5 makes the action sensitive; ≥ `denySecret` denies |
+| `destructive` | noul | ≥ 0.5 makes the action sensitive; ≥ `denyDestructive` denies (off by default) |
+| `secret_exposure` | noul | ≥ 0.5 makes the action sensitive; ≥ `denySecret` denies (off by default) |
 | `scope_escalation` | noul | ≥ 0.5 on a sensitive action denies |
 | `trust_external` | noul | ≥ 0.5 on a sensitive action denies |
-| `risk` | score | ≥ `denyRisk` denies a shell command |
+| `risk` | score | ≥ `denyRisk` denies a shell command (off by default) |
 | `category` | choice | logged only |
 
 ```mermaid
@@ -307,7 +307,7 @@ flowchart TD
     scope -- no --> external{"trust_external (noul) ≥ 0.5?"}
     external -- "yes: External" --> deny
     external -- no --> backstop
-    sensitive -- no --> backstop{"Backstop: destructive ≥ denyDestructive, secret_exposure ≥ denySecret, or risk (score) ≥ denyRisk?"}
+    sensitive -- no --> backstop{"Backstop, off unless configured: destructive ≥ denyDestructive, secret_exposure ≥ denySecret, or risk (score) ≥ denyRisk?"}
     backstop -- yes --> deny
     backstop -- no --> allow["Allow"]
 
