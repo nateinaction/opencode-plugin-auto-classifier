@@ -51,6 +51,8 @@ export type Options = {
   failMode?: FailMode
   cacheTtlMs?: number
   debug?: boolean
+  /** Where `debug` lines are appended. Empty uses OpenCode's log directory. */
+  debugLog?: string
 }
 
 export type Decision = {
@@ -83,6 +85,7 @@ export const DEFAULTS = {
   confidenceFloor: 0.6,
   repeatBlocks: { ...REPEAT_DEFAULTS },
   debug: false,
+  debugLog: "",
   provider: "jev" as Provider,
   model: PROVIDER_DEFAULTS.jev.model,
   endpoint: PROVIDER_DEFAULTS.jev.endpoint,

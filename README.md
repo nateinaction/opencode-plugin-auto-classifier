@@ -201,7 +201,8 @@ passed through the object form:
 | `fallbackModel`    | `opencode-go/deepseek-v4.1-flash` | `provider/model` used for the fallback       |
 | `failMode`         | `open`           | `open` leaves the decision unchanged on error; `closed` escalates |
 | `cacheTtlMs`       | `300000`         | Classification cache TTL                                      |
-| `debug`            | `false`          | Log each classification to the server log                     |
+| `debug`            | `false`          | Log each classification to `debugLog`                         |
+| `debugLog`         | `~/.local/share/opencode/log/auto-classifier.log` | File `debug` appends to (honours `XDG_DATA_HOME`) |
 
 There are two tiers: the `deny*` thresholds always deny, and the `ask*`
 thresholds escalate. `escalateTo` decides what an escalation becomes, so
@@ -237,11 +238,18 @@ rather than a score escalator. The differences:
   project's `AGENTS.md`, so explicit intent clears a soft block and a stated
   boundary blocks. Tool results are never sent.
 - **Hybrid.** Jev answers a parallel question set over the assembled state; when
-  an answer is below `confidenceFloor`, or Jev fails, the LLM fallback decides.
+  an answer is below `confidenceFloor`, a yes/no signal near 50% could flip
+  allow vs deny, or Jev fails, the LLM fallback decides. A near-50% signal that
+  cannot change the outcome (e.g. "did the user authorize this?" when no soft
+  rule matched) is ignored. If the fallback is still inconclusive, the action
+  is denied.
 
 Precedence (applied in code): `hard_deny` → deny; a stated boundary → deny;
 `soft_deny` → deny unless an `allow` entry matches or you named the action;
-scope escalation → deny; then the severity backstop. Denials are labelled
+scope escalation or reaching outside the trusted environment → deny, but only
+for an action that is also destructive or may expose secrets (a terse request
+like `@skill 125` never names the harmless commands an agent runs for it); then
+the severity backstop. Denials are labelled
 `[auto-classifier] [<Rule>] ...`.
 
 Review scope follows Claude Code: `shell`, `webfetch`, `websearch`,

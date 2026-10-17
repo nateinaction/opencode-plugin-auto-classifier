@@ -28,8 +28,9 @@
 //   "jev" (default) -> https://opencode.ai/zen/v1/systemone (key: OPENCODE_API_KEY)
 //   "openrouter"    -> https://openrouter.ai/api/alpha/decisions (key: OPENROUTER_API_KEY)
 
-import { readFile } from "node:fs/promises"
-import { isAbsolute, join, resolve, sep } from "node:path"
+import { appendFile, mkdir, readFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 
 import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "./jev.ts"
 import { JevClassifierRpc } from "./rpc.ts"
@@ -75,8 +76,18 @@ export default {
       timeoutMs: opts.timeoutMs,
     })
 
+    // Debug lines go to a file: a plugin's stderr is not captured when OpenCode
+    // runs as a background service, and the plugin API offers no logger. The
+    // default sits beside OpenCode's own log.
+    const debugLog =
+      opts.debugLog || join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "opencode", "log", "auto-classifier.log")
     const log = (...args: unknown[]) => {
-      if (opts.debug) console.error("[auto-classifier]", ...args)
+      if (!opts.debug) return
+      const text = args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")
+      const entry = `${new Date().toISOString()} ${text}\n`
+      mkdir(dirname(debugLog), { recursive: true })
+        .then(() => appendFile(debugLog, entry))
+        .catch((error) => console.error("[auto-classifier] debug log write failed:", String(error), entry))
     }
 
     // Rolling record of recent classifications, exposed to the TUI plugin over
@@ -296,7 +307,7 @@ export default {
       return parseAutoVerdict(text, "fallback")
     }
 
-    async function classifyAuto(state: string, signal?: AbortSignal): Promise<AutoVerdict> {
+    async function classifyAuto(state: string, action: string, signal?: AbortSignal): Promise<AutoVerdict> {
       const key = `${rulesKey}\n${state}`
       const hit = autoCache.get(key)
       const now = Date.now()
@@ -314,7 +325,7 @@ export default {
       }
 
       // Confidence-gated routing: an inconclusive answer asks the LLM instead.
-      if (belowConfidence(verdict, opts.confidenceFloor)) {
+      if (belowConfidence(verdict, opts.confidenceFloor, opts, action)) {
         if (canFallback()) {
           try {
             verdict = await autoFallback(state)
@@ -324,7 +335,8 @@ export default {
         }
         // Still inconclusive: with fail-closed, an unusable verdict is denied
         // rather than allowed (mirrors Claude Code's "no verdict" behavior).
-        if (belowConfidence(verdict, opts.confidenceFloor) && opts.failMode === "closed") {
+        if (belowConfidence(verdict, opts.confidenceFloor, opts, action) && opts.failMode === "closed") {
+          log("inconclusive verdict", JSON.stringify({ action, verdict }))
           throw new Error("auto-classifier: inconclusive verdict; failing closed")
         }
       }
@@ -340,11 +352,11 @@ export default {
     ): Promise<AutoDecision> {
       let worst: AutoDecision = { effect: "allow", reason: "" }
       for (const item of items) {
-        const verdict = await classifyAuto(item.state, signal)
+        const verdict = await classifyAuto(item.state, item.action, signal)
         const decision = decideAuto(verdict, opts, item.action)
         log(
           "classified",
-          JSON.stringify({ mode: "auto", resource: item.label, effect: decision.effect, rule: decision.rule }),
+          JSON.stringify({ mode: "auto", resource: item.label, effect: decision.effect, rule: decision.rule, verdict }),
         )
         recordEntry({
           at: Date.now(),

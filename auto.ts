@@ -70,12 +70,16 @@ export function decideAuto(verdict: AutoVerdict, opts: Required<Options>, action
     if (!cleared) return deny(soft, `Matched soft rule [${soft}].`)
   }
 
-  if (yes(verdict.scopeEscalation)) return deny("Scope Escalation", "The action escalates beyond what the user asked.")
-
-  // Reaching outside the trust boundary. "Where a rule requires it" means the
-  // action also carries a sensitive effect; a bare external read-only fetch is
-  // left to the rules rather than denied outright.
-  if (yes(verdict.trustExternal) && (destructive >= INTENT_THRESHOLD || secretExposure >= INTENT_THRESHOLD)) {
+  // Scope and trust only block an action that also carries a sensitive effect.
+  // The user's request clears soft blocks; on its own it is no reason to deny.
+  // A terse request ("@skill 125") never names the many harmless commands an
+  // agent runs to fulfil it, so a standalone scope check denies nearly all of
+  // them, and a bare external read-only fetch is left to the rules.
+  const sensitive = destructive >= INTENT_THRESHOLD || secretExposure >= INTENT_THRESHOLD
+  if (sensitive && yes(verdict.scopeEscalation)) {
+    return deny("Scope Escalation", "The action escalates beyond what the user asked with sensitive effect.")
+  }
+  if (sensitive && yes(verdict.trustExternal)) {
     return deny("External", "The action reaches outside the trusted environment with sensitive effect.")
   }
 
@@ -132,18 +136,37 @@ export function denyMessage(decision: AutoDecision): string {
   return `[auto-classifier] ${tag}${decision.reason}`
 }
 
+/** Yes/no signals that can only clear an action (permissive) or only block it (restrictive). */
+const PERMISSIVE_SIGNALS = ["userAuthorizes"] as const
+const RESTRICTIVE_SIGNALS = ["trustExternal", "userForbids", "scopeEscalation"] as const
+
+const ambiguous = (prob: number): boolean => Math.abs(prob - INTENT_THRESHOLD) < AMBIGUOUS_BAND
+
+/** The verdict with each ambiguous signal settled at its most permissive (`lenient`) or most restrictive end. */
+function settle(verdict: AutoVerdict, lenient: boolean): AutoVerdict {
+  const settled = { ...verdict }
+  for (const key of PERMISSIVE_SIGNALS) if (ambiguous(verdict[key])) settled[key] = lenient ? 1 : 0
+  for (const key of RESTRICTIVE_SIGNALS) if (ambiguous(verdict[key])) settled[key] = lenient ? 0 : 1
+  return settled
+}
+
 /**
  * True when a decision-relevant answer is too uncertain to act on: either the
- * choice confidence is below `floor`, or an intent/trust signal sits within the
- * ambiguous band around its threshold (Jev's yes/no answers carry no confidence
- * of their own).
+ * choice confidence is below `floor`, or an intent/trust signal within the
+ * ambiguous band around its threshold could flip the decision (Jev's yes/no
+ * answers carry no confidence of their own).
+ *
+ * `decideAuto` is monotone in every signal, so settling all ambiguous signals
+ * at their most permissive and most restrictive ends bounds every combination:
+ * if both ends decide alike, the ambiguity is irrelevant. A model answering 0.5
+ * for "not applicable" (e.g. user_authorizes when no soft rule matched) no
+ * longer fails the action closed.
  */
-export function belowConfidence(verdict: AutoVerdict, floor: number): boolean {
+export function belowConfidence(verdict: AutoVerdict, floor: number, opts: Required<Options>, action = "shell"): boolean {
   if (!(verdict.confidence >= floor)) return true
-  for (const prob of [verdict.trustExternal, verdict.userAuthorizes, verdict.userForbids, verdict.scopeEscalation]) {
-    if (Math.abs(prob - INTENT_THRESHOLD) < AMBIGUOUS_BAND) return true
-  }
-  return false
+  const lenient = decideAuto(settle(verdict, true), opts, action).effect
+  const strict = decideAuto(settle(verdict, false), opts, action).effect
+  return lenient !== strict
 }
 
 /** True when repeated blocks have reached either configured threshold. */

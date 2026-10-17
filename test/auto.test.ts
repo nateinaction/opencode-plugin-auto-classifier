@@ -56,10 +56,16 @@ test("explicit user intent clears a soft block", () => {
   assert.equal(decideAuto(verdict({ softDenyRule: "Git Destructive", userAuthorizes: 0.8 }), opts()).effect, "allow")
 })
 
-test("scope escalation denies", () => {
-  const d = decideAuto(verdict({ scopeEscalation: 0.7 }), opts())
+test("scope escalation denies an action with a sensitive effect", () => {
+  const d = decideAuto(verdict({ scopeEscalation: 0.7, destructive: 0.6 }), opts())
   assert.equal(d.effect, "deny")
   assert.equal(d.rule, "Scope Escalation")
+  assert.equal(decideAuto(verdict({ scopeEscalation: 0.7, secretExposure: 0.6 }), opts()).rule, "Scope Escalation")
+})
+
+test("scope escalation alone does not deny a harmless action", () => {
+  // A terse request ("@wayfinder 125") never names each read an agent runs.
+  assert.equal(decideAuto(verdict({ scopeEscalation: 0.9, risk: 0.2 }), opts()).effect, "allow")
 })
 
 test("the severity backstop denies even with no rule match", () => {
@@ -120,16 +126,30 @@ test("authority stops auto-approving once prompting is resumed", () => {
 })
 
 test("belowConfidence treats a missing confidence as inconclusive", () => {
-  assert.equal(belowConfidence(verdict({ confidence: 0.5 }), 0.6), true)
-  assert.equal(belowConfidence(verdict({ confidence: 0.9 }), 0.6), false)
-  assert.equal(belowConfidence(verdict({ confidence: Number.NaN }), 0.6), true)
+  assert.equal(belowConfidence(verdict({ confidence: 0.5 }), 0.6, opts()), true)
+  assert.equal(belowConfidence(verdict({ confidence: 0.9 }), 0.6, opts()), false)
+  assert.equal(belowConfidence(verdict({ confidence: Number.NaN }), 0.6, opts()), true)
 })
 
-test("belowConfidence treats an intent signal near its threshold as inconclusive", () => {
-  // A yes/no answer right on the boundary is too close to act on.
-  assert.equal(belowConfidence(verdict({ userForbids: 0.5 }), 0.6), true)
-  assert.equal(belowConfidence(verdict({ trustExternal: 0.45 }), 0.6), true)
-  assert.equal(belowConfidence(verdict({ userForbids: 0.05 }), 0.6), false)
+test("belowConfidence treats a near-threshold signal that flips the decision as inconclusive", () => {
+  // A boundary answer to "did the user forbid this?" decides allow vs deny.
+  assert.equal(belowConfidence(verdict({ userForbids: 0.5 }), 0.6, opts()), true)
+  assert.equal(belowConfidence(verdict({ scopeEscalation: 0.45, destructive: 0.6 }), 0.6, opts()), true)
+  // Authorization matters once a soft rule matched.
+  assert.equal(belowConfidence(verdict({ softDenyRule: "Git Destructive", userAuthorizes: 0.5 }), 0.6, opts()), true)
+  // Trust only matters with a sensitive effect.
+  assert.equal(belowConfidence(verdict({ trustExternal: 0.5, destructive: 0.6 }), 0.6, opts()), true)
+  assert.equal(belowConfidence(verdict({ userForbids: 0.05 }), 0.6, opts()), false)
+})
+
+test("belowConfidence ignores near-threshold signals that cannot change the decision", () => {
+  // No soft rule matched, so authorization is moot.
+  assert.equal(belowConfidence(verdict({ userAuthorizes: 0.5 }), 0.6, opts()), false)
+  // No sensitive effect, so an uncertain trust boundary or scope is moot.
+  assert.equal(belowConfidence(verdict({ trustExternal: 0.45 }), 0.6, opts()), false)
+  assert.equal(belowConfidence(verdict({ scopeEscalation: 0.5 }), 0.6, opts()), false)
+  // A hard rule denies whatever the intent signals say.
+  assert.equal(belowConfidence(verdict({ hardDenyRule: "Data Exfiltration", userForbids: 0.5, userAuthorizes: 0.5 }), 0.6, opts()), false)
 })
 
 test("authority never lowers an explicit deny", () => {
