@@ -31,6 +31,16 @@ export type Feedback = {
   warning?: { base?: string }
 }
 
+/**
+ * Drop fields that are present but `undefined` (e.g. `rule` on an allow).
+ * OpenCode validates RPC payloads against rpc.ts, where an optional field may
+ * be absent but never `undefined`; one such entry fails the whole `recent`
+ * call and every `classified` event.
+ */
+export function compact(entry: Entry): Entry {
+  return Object.fromEntries(Object.entries(entry).filter(([, value]) => value !== undefined)) as Entry
+}
+
 /** Single-character marker for an effect: allow ".", ask "?", deny "x". */
 export function mark(effect: string): string {
   if (effect === "deny") return "x"

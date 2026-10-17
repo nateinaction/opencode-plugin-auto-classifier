@@ -49,7 +49,7 @@ import {
 } from "./decide.ts"
 import { mergeRules } from "./rules.ts"
 import { buildState } from "./context.ts"
-import type { Entry } from "./format.ts"
+import { compact, type Entry } from "./format.ts"
 import {
   autoAuthority,
   belowConfidence,
@@ -103,8 +103,12 @@ export default {
           recent: async () => ({ entries: recent }),
         })
         emitClassified = (entry: Entry) => {
+          // emit may throw synchronously or reject (e.g. a schema mismatch);
+          // log either way rather than drop the failure.
           try {
-            void registration.events.emit("classified", entry)
+            Promise.resolve(registration.events.emit("classified", entry)).catch((error: unknown) =>
+              log("emit failed", String(error)),
+            )
           } catch (error) {
             log("emit failed", String(error))
           }
@@ -116,7 +120,7 @@ export default {
 
     const build = await readBuild()
     function recordEntry(entry: Entry) {
-      const stamped: Entry = { ...entry, mode: opts.mode, build }
+      const stamped = compact({ ...entry, mode: opts.mode, build })
       recent.unshift(stamped)
       if (recent.length > RECENT_LIMIT) recent.length = RECENT_LIMIT
       emitClassified?.(stamped)

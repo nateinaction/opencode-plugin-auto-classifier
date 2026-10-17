@@ -1,10 +1,17 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { colorFor, GREEN, line, mark, ORANGE, RED, RESOURCE_MAX, stamp, trim, type Entry } from "../format.ts"
+import { colorFor, compact, GREEN, line, mark, ORANGE, RED, RESOURCE_MAX, stamp, trim, type Entry } from "../format.ts"
 
 function entry(over: Partial<Entry> = {}): Entry {
   return { at: 0, action: "shell", resource: "ls", effect: "allow", reason: "", via: "jev", ...over }
 }
+
+test("compact drops undefined fields so the RPC schema accepts the entry", () => {
+  const out = compact(entry({ rule: undefined, mode: "auto-mode", build: "f20b22d" }))
+  assert.equal(Object.hasOwn(out, "rule"), false)
+  assert.deepEqual(out, entry({ mode: "auto-mode", build: "f20b22d" }))
+  assert.equal(compact(entry({ rule: "Git Destructive" })).rule, "Git Destructive")
+})
 
 test("mark maps effects to single characters", () => {
   assert.equal(mark("allow"), ".")
