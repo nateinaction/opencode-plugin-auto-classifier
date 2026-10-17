@@ -8,6 +8,8 @@
 import type { RuleLists } from "./rules.ts"
 
 export type FailMode = "open" | "closed"
+export const UNCERTAIN_POLICIES = ["fallback", "accept", "deny"] as const
+export type UncertainPolicy = (typeof UNCERTAIN_POLICIES)[number]
 
 /** Where Jev is served: OpenCode Zen ("jev") or OpenRouter ("openrouter"). */
 export type Provider = "jev" | "openrouter"
@@ -26,8 +28,14 @@ export type Options = {
   rules?: RuleLists
   /** How much conversation context auto-mode sends to the classifier. */
   conversationContext?: "none" | "prompt" | "session"
-  /** auto-mode: route to the LLM fallback when a decision-relevant answer is below this. */
+  /** auto-mode: a decision-relevant answer below this is uncertain (see `onUncertain`). */
   confidenceFloor?: number
+  /**
+   * auto-mode: what an uncertain Jev verdict becomes. "fallback" asks the LLM
+   * fallback, "accept" acts on Jev's own answers, "deny" blocks the action.
+   * Jev failing outright is governed by `fallback` and `failMode` instead.
+   */
+  onUncertain?: UncertainPolicy
   /** auto-mode: stop classifying and resume prompting after this many blocks. */
   repeatBlocks?: { consecutive?: number; total?: number }
   /** Where Jev is served. Defaults to "jev" (OpenCode Zen). */
@@ -99,6 +107,7 @@ export const DEFAULTS = {
   privilegedAsk: true,
   escalateTo: "ask" as "ask" | "deny",
   escalate: {} as Partial<Record<"shell" | "read" | "edit", ActionThresholds>>,
+  onUncertain: "fallback" as UncertainPolicy,
   fallback: true,
   fallbackModel: "opencode-go/deepseek-v4.1-flash",
   failMode: "open" as FailMode,
@@ -180,6 +189,8 @@ export function normalize(options: Options): Required<Options> {
   merged.repeatBlocks = { ...DEFAULTS.repeatBlocks, ...(options.repeatBlocks ?? {}) }
   // auto-mode denies an action it cannot classify unless the user chose otherwise.
   if (merged.mode === "auto-mode" && options.failMode === undefined) merged.failMode = "closed"
+  // A misspelled policy must not act on uncertain verdicts as "accept" would.
+  if (!UNCERTAIN_POLICIES.includes(merged.onUncertain)) merged.onUncertain = "deny"
   // auto-mode leaves deletion to its rules and the user's stated intent. Jev
   // rates nearly every rm 95-98% destructive, so a 0.97 backstop denies at
   // random and overrides an explicit request; denySecret and denyRisk are

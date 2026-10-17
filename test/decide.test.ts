@@ -187,3 +187,9 @@ test("auto-mode defaults to fail-closed and merges repeatBlocks over the default
   assert.equal(normalize({ mode: "auto-mode", failMode: "open" }).failMode, "open")
   assert.deepEqual(normalize({ repeatBlocks: { consecutive: 5 } }).repeatBlocks, { consecutive: 5, total: 20 })
 })
+
+test("onUncertain defaults to the fallback, and an unknown policy denies", () => {
+  assert.equal(normalize({ mode: "auto-mode" }).onUncertain, "fallback")
+  assert.equal(normalize({ mode: "auto-mode", onUncertain: "accept" }).onUncertain, "accept")
+  assert.equal(normalize({ mode: "auto-mode", onUncertain: "acept" as any }).onUncertain, "deny")
+})

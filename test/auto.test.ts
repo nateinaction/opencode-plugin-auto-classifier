@@ -70,6 +70,14 @@ test("a stated user boundary denies", () => {
   assert.equal(d.rule, "User Boundary")
 })
 
+test("a verdict marked uncertain denies, though its answers would allow", () => {
+  const d = decideAuto(verdict({ uncertain: true, allowRule: "Local Operations" }), opts())
+  assert.equal(d.effect, "deny")
+  assert.equal(d.rule, "Uncertain")
+  // A confident hard rule keeps its own label.
+  assert.equal(decideAuto(verdict({ uncertain: true, hardDenyRule: "Data Exfiltration" }), opts()).rule, "Data Exfiltration")
+})
+
 test("a soft-deny match denies unless an allow exception matches", () => {
   assert.equal(decideAuto(verdict({ softDenyRule: "Git Destructive" }), opts()).effect, "deny")
   assert.equal(

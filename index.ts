@@ -344,25 +344,36 @@ export default {
         verdict = await autoFallback(state)
       }
 
-      // Confidence-gated routing: an inconclusive answer asks the LLM instead.
+      // Confidence-gated routing: `onUncertain` decides what an inconclusive
+      // verdict becomes. "accept" leaves Jev's own answers to decide.
       if (belowConfidence(verdict, opts.confidenceFloor, opts, action)) {
-        if (canFallback()) {
-          try {
-            verdict = await autoFallback(state)
-          } catch (error) {
-            log("low-confidence fallback failed", String(error))
-          }
-        }
-        // Still inconclusive: with fail-closed, an unusable verdict is denied
-        // rather than allowed (mirrors Claude Code's "no verdict" behavior).
-        if (belowConfidence(verdict, opts.confidenceFloor, opts, action) && opts.failMode === "closed") {
-          log("inconclusive verdict", JSON.stringify({ action, verdict }))
-          throw new Error("auto-classifier: inconclusive verdict; failing closed")
-        }
+        // A fallback's verdict replaces this one; keep it for diagnosis.
+        log("inconclusive", JSON.stringify({ action, onUncertain: opts.onUncertain, verdict }))
+        if (opts.onUncertain === "deny") verdict = { ...verdict, uncertain: true }
+        else if (opts.onUncertain === "fallback") verdict = await fallbackForUncertain(verdict, state, action)
       }
 
       if (autoCache.size > 500) autoCache.clear()
       autoCache.set(key, { at: now, value: verdict })
+      return verdict
+    }
+
+    /** The LLM fallback's verdict for an uncertain one; throws when failing closed. */
+    async function fallbackForUncertain(uncertain: AutoVerdict, state: string, action: string): Promise<AutoVerdict> {
+      let verdict = uncertain
+      if (canFallback()) {
+        try {
+          verdict = await autoFallback(state)
+        } catch (error) {
+          log("low-confidence fallback failed", String(error))
+        }
+      }
+      // Still inconclusive: with fail-closed, an unusable verdict is denied
+      // rather than allowed (mirrors Claude Code's "no verdict" behavior).
+      if (belowConfidence(verdict, opts.confidenceFloor, opts, action) && opts.failMode === "closed") {
+        log("inconclusive verdict", JSON.stringify({ action, verdict }))
+        throw new Error("auto-classifier: inconclusive verdict; failing closed")
+      }
       return verdict
     }
 

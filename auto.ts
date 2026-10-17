@@ -38,6 +38,8 @@ export type AutoVerdict = {
   confidence: number
   /** Each choice question's confidence, for debug logging. */
   choiceConfidence?: Record<string, number>
+  /** Too uncertain to act on, and `onUncertain` is "deny". */
+  uncertain?: boolean
   source?: string
 }
 
@@ -64,6 +66,8 @@ export function decideAuto(verdict: AutoVerdict, opts: Required<Options>, action
 
   const hard = ruleName(verdict.hardDenyRule)
   if (hard) return deny(hard, `Matched hard rule [${hard}].`)
+
+  if (verdict.uncertain) return deny("Uncertain", "The classifier was too uncertain to allow this action.")
 
   if (yes(verdict.userForbids)) return deny("User Boundary", "The user stated a boundary this action crosses.")
 
