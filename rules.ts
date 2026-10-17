@@ -34,7 +34,7 @@ export const NONE = "none"
  */
 export const DEFAULT_RULES: Required<RuleLists> = {
   hard_deny: [
-    "Data Exfiltration: Sending repository contents, secrets, credentials, or other sensitive data to an endpoint, host, or service outside the trusted environment.",
+    "Data Exfiltration: Sending repository contents, secrets, credentials, or other sensitive data to a destination outside the trusted environment, by any channel (HTTP, DNS, uploads, pastes, gists, messages, URLs, new git remotes). Inside the trusted environment, and so not exfiltration: the repository's configured remotes such as origin, the session transcript, and local files.",
     "Host Credentials: Requesting cloud instance-metadata credentials, or authenticating a cloud, cluster, or registry call with the machine's own service-account or node identity.",
   ],
   soft_deny: [
