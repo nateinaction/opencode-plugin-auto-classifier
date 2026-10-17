@@ -302,8 +302,20 @@ test("parseAutoAnswers maps the verdict and takes the lowest choice confidence",
   assert.equal(verdict.destructive, 0.92)
   assert.equal(verdict.secretExposure, 0.23)
   assert.equal(verdict.softDenyRule, "Git Destructive")
-  // min(0.8, 0.7, 0.9, 0.95) = 0.7
+  // A soft rule matched, so allow_rule counts: min(0.8, 0.7, 0.9) = 0.7
   assert.equal(verdict.confidence, 0.7)
+  assert.deepEqual(verdict.choiceConfidence, { hard_deny_rule: 0.8, soft_deny_rule: 0.7, allow_rule: 0.9, category: 0.95 })
+})
+
+test("parseAutoAnswers ignores choices that cannot change the decision", () => {
+  const answers = {
+    ...AUTO_ANSWERS.answers,
+    soft_deny_rule: { choice: "none", confidence: 0.9, probabilities: { none: 0.9 } },
+    allow_rule: { choice: "Read-Only HTTP", confidence: 0.3, probabilities: { "Read-Only HTTP": 0.3 } },
+    category: { choice: "read", confidence: 0.4, probabilities: { read: 0.4 } },
+  }
+  // No soft rule matched: neither allow_rule nor category can flip the outcome.
+  assert.equal(parseAutoAnswers(answers).confidence, 0.8)
 })
 
 test("parseAutoAnswers treats a missing rule choice confidence as inconclusive", () => {

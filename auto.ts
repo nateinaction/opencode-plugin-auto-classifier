@@ -35,6 +35,8 @@ export type AutoVerdict = {
   scopeEscalation: number
   /** Lowest confidence among the decision-relevant answers. */
   confidence: number
+  /** Each choice question's confidence, for debug logging. */
+  choiceConfidence?: Record<string, number>
   source?: string
 }
 

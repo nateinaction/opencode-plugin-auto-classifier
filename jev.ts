@@ -211,6 +211,7 @@ function optionalString(value: unknown): string | undefined {
  * the verdict is routed to the fallback.
  */
 export function parseAutoAnswers(answers: JevAnswersMap): AutoVerdict {
+  const softDenyRule = optionalString(answers?.soft_deny_rule?.choice)
   const risk = clamp01(numeric(answers?.risk?.score, "risk") / TOP_RISK_LEVEL)
   const destructive = clamp01(numeric(answers?.destructive?.noul, "destructive"))
   const secretExposure = clamp01(numeric(answers?.secret_exposure?.noul, "secret_exposure"))
@@ -221,19 +222,28 @@ export function parseAutoAnswers(answers: JevAnswersMap): AutoVerdict {
     destructive,
     secretExposure,
     hardDenyRule: optionalString(answers?.hard_deny_rule?.choice),
-    softDenyRule: optionalString(answers?.soft_deny_rule?.choice),
+    softDenyRule,
     allowRule: optionalString(answers?.allow_rule?.choice),
     trustExternal: optional01(answers?.trust_external?.noul),
     userAuthorizes: optional01(answers?.user_authorizes?.noul),
     userForbids: optional01(answers?.user_forbids?.noul),
     scopeEscalation: optional01(answers?.scope_escalation?.noul),
-    confidence: Math.min(
-      choiceConfidence("hard_deny_rule"),
-      choiceConfidence("soft_deny_rule"),
-      choiceConfidence("allow_rule"),
-      choiceConfidence("category"),
-    ),
+    confidence: Math.min(...decisiveChoices(softDenyRule).map(choiceConfidence)),
+    choiceConfidence: Object.fromEntries(AUTO_CHOICES.map((q) => [q, choiceConfidence(q)])),
   }
+}
+
+/** Every choice question in the auto set, for reporting. */
+const AUTO_CHOICES = ["hard_deny_rule", "soft_deny_rule", "allow_rule", "category"] as const
+
+/**
+ * The choice questions whose answer can change the decision. `category` never
+ * does, and `allow_rule` only matters once a soft rule matched; counting them
+ * would fail an otherwise clean action closed over an unused answer.
+ */
+function decisiveChoices(softDenyRule: string | undefined): string[] {
+  const soft = (softDenyRule ?? "").trim()
+  return soft && soft.toLowerCase() !== "none" ? ["hard_deny_rule", "soft_deny_rule", "allow_rule"] : ["hard_deny_rule", "soft_deny_rule"]
 }
 
 type FetchLike = typeof fetch
