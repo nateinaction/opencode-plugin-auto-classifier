@@ -1,16 +1,17 @@
 // Pure decision logic for the `auto-mode` profile.
 //
 // Mirrors Claude Code's auto-mode classifier: enumerated rules and a stated
-// user intent produce a *binary* allow/deny (the classifier never asks), with
-// precedence applied here rather than by the classifier. It also owns the two
-// policy questions that sit around the classifier: which actions are reviewed
-// at all (`coverageFor`), and how the verdict becomes an OpenCode effect
-// (`autoAuthority`).
+// user intent produce an allow/deny (usually binary; a sensitive read outside
+// the trusted roots asks), with precedence applied here rather than by the
+// classifier. It also owns the two policy questions that sit around the
+// classifier: which actions are reviewed at all (`coverageFor`), and how the
+// verdict becomes an OpenCode effect (`autoAuthority`).
 //
 // Side-effect free, so it is unit-testable without the OpenCode runtime.
 
 import { pct, REPEAT_DEFAULTS, type Options } from "./decide.ts"
 import { NONE } from "./rules.ts"
+import type { TrustFacts } from "./trust.ts"
 
 export type AutoVerdict = {
   category?: string
@@ -43,13 +44,40 @@ export type AutoVerdict = {
   source?: string
 }
 
-export type AutoDecision = { effect: "allow" | "deny"; rule?: string; reason: string }
+export type AutoDecision = { effect: "allow" | "ask" | "deny"; rule?: string; reason: string }
 
 /** A yes/no answer at or above this probability counts as "yes". */
 export const INTENT_THRESHOLD = 0.5
 
 /** A yes/no answer within this band of the threshold is too close to call. */
 export const AMBIGUOUS_BAND = 0.1
+
+/**
+ * Above this, a verdict names credentials or data leaving the machine, so even
+ * an uncertain answer is not settled by the facts. Jev's secret_exposure for
+ * ordinary local work sits at 0.5-0.7; .env and key material sit near 0.9.
+ */
+export const TIERED_SECRET_CEILING = 0.8
+
+/** Categories an uncertain, in-root action may hold and still be allowed. */
+const TIERED_CATEGORIES = new Set(["read", "build", "write", "vcs", "other"])
+
+/** `git status` is a read; these rewrite state and are not settled by location. */
+const GIT_MUTATION =
+  /\bgit\s+(?:-C\s+\S+\s+)?(?:push|commit|reset|clean|rebase|merge|tag|cherry-pick|revert|am|apply|stash|worktree\s+(?:add|remove|prune)|branch\s+-[dD])\b/
+
+/** A push leaves the machine, so scope still applies however local the repo is. */
+const GIT_PUSH = /\bgit\s+(?:-C\s+\S+\s+)?push\b/
+
+/**
+ * True when the action cannot change state. Category alone is not enough (a
+ * `git commit` is `vcs` too), so the path actions are listed by name and shell
+ * commands have to be classified as a read by the model.
+ */
+export function readOnly(action: string, verdict: AutoVerdict): boolean {
+  if (action === "read" || action === "glob" || action === "grep" || action === "external_directory") return true
+  return action === "shell" && (verdict.category === "read" || verdict.category === "vcs")
+}
 
 function ruleName(value: string | undefined): string | undefined {
   const name = (value ?? "").trim()
@@ -58,35 +86,77 @@ function ruleName(value: string | undefined): string | undefined {
 
 const yes = (value: number): boolean => value >= INTENT_THRESHOLD
 
-/** Fold an auto-mode verdict into a binary decision, applying rule precedence. */
-export function decideAuto(verdict: AutoVerdict, opts: Required<Options>, action = "shell"): AutoDecision {
+/** Fold an auto-mode verdict into a decision, applying rule precedence. */
+export function decideAuto(
+  verdict: AutoVerdict,
+  opts: Required<Options>,
+  action = "shell",
+  facts?: TrustFacts,
+  resource = "",
+): AutoDecision {
   const { category, risk, destructive, secretExposure } = verdict
   const bits = `risk=${pct(risk)} destructive=${pct(destructive)} secret=${pct(secretExposure)} via=${verdict.source ?? "jev"}`
   const deny = (rule: string | undefined, reason: string): AutoDecision => ({ effect: "deny", rule, reason: `${reason} ${bits}` })
+  const allow = (rule: string | undefined, reason: string): AutoDecision => ({ effect: "allow", rule, reason: `${reason} ${bits}` })
 
   const hard = ruleName(verdict.hardDenyRule)
   if (hard) return deny(hard, `Matched hard rule [${hard}].`)
 
-  if (verdict.uncertain) return deny("Uncertain", "The classifier was too uncertain to allow this action.")
+  // The plugin resolves local paths itself; the model's trust answer only
+  // decides what leaves the machine (`webfetch`/`websearch`, or a network
+  // command). Inside the working directory, scratch directory, or a repo
+  // worktree, an external claim cannot stand.
+  const outbound = action === "webfetch" || action === "websearch" || category === "network"
+  const located = facts?.known === true
+  // A local action that neither leaves the machine nor destroys data cannot
+  // cross a task boundary in a way worth denying: an unrequested `pytest` or
+  // `tail` is not a safety event. Scope stays meaningful for pushes, network
+  // sends, and destructive actions.
+  const localSafe =
+    located &&
+    facts?.inside === true &&
+    !outbound &&
+    destructive < INTENT_THRESHOLD &&
+    secretExposure < TIERED_SECRET_CEILING &&
+    !GIT_PUSH.test(resource)
+  const external = outbound || !located ? yes(verdict.trustExternal) : facts?.inside !== true
+
+  if (verdict.uncertain) return uncertain(verdict, opts, action, facts, bits, resource)
 
   if (yes(verdict.userForbids)) return deny("User Boundary", "The user stated a boundary this action crosses.")
 
   const soft = ruleName(verdict.softDenyRule)
   if (soft) {
-    const cleared = ruleName(verdict.allowRule) || yes(verdict.userAuthorizes)
-    if (!cleared) return deny(soft, `Matched soft rule [${soft}].`)
+    // A generic allow entry cannot clear a block on a credential-shaped action;
+    // the secret ceiling keeps `.env` from riding `Local Operations` through.
+    const clears = Boolean(ruleName(verdict.allowRule)) && secretExposure < TIERED_SECRET_CEILING
+    if (!clears && !yes(verdict.userAuthorizes)) return deny(soft, `Matched soft rule [${soft}].`)
   }
+
+  // A matched allow exception is the user's own rule list saying this action is
+  // permitted. It outranks scope and trust, which are advisory guesses about
+  // intent; before this, 37 of 57 denials matched an allow rule and were denied
+  // anyway by the sensitivity gate.
+  const allowed = ruleName(verdict.allowRule)
+  if (allowed && secretExposure < TIERED_SECRET_CEILING) return allow(allowed, `Matched allow rule [${allowed}].`)
 
   // Scope and trust only block an action that also carries a sensitive effect.
   // The user's request clears soft blocks; on its own it is no reason to deny.
   // A terse request ("@skill 125") never names the many harmless commands an
-  // agent runs to fulfil it, so a standalone scope check denies nearly all of
-  // them, and a bare external read-only fetch is left to the rules.
+  // agent runs to fulfil it, and local work does not cross a trust boundary.
   const sensitive = destructive >= INTENT_THRESHOLD || secretExposure >= INTENT_THRESHOLD
-  if (sensitive && yes(verdict.scopeEscalation)) {
+  // A read outside the roots is a trust question, not a scope one: let the
+  // external branch below turn it into a prompt.
+  const outsideRead = located && facts?.inside === false && readOnly(action, verdict)
+  if (sensitive && yes(verdict.scopeEscalation) && !localSafe && !outsideRead) {
     return deny("Scope Escalation", "The action escalates beyond what the user asked with sensitive effect.")
   }
-  if (sensitive && yes(verdict.trustExternal)) {
+  if (sensitive && external) {
+    // A read outside the trusted roots is reviewable, not forbidden: the user
+    // can approve a log or a sibling checkout without loosening everything.
+    if (readOnly(action, verdict) && !outbound) {
+      return { effect: "ask", rule: "External", reason: `The action reads outside the trusted environment. ${bits}` }
+    }
     return deny("External", "The action reaches outside the trusted environment with sensitive effect.")
   }
 
@@ -95,6 +165,46 @@ export function decideAuto(verdict: AutoVerdict, opts: Required<Options>, action
   if (action === "shell" && risk >= opts.denyRisk) return deny("Critical", "The command is rated critical risk.")
 
   return { effect: "allow", reason: bits }
+}
+
+/**
+ * Decide an inconclusive verdict from the facts, not from the model's guesses.
+ *
+ * The dominant false denial in the debug logs was a local `pytest`, `grep`, or
+ * `tail` run whose `secret_exposure` sat at 0.6 and whose fallback model did not
+ * exist, so it failed closed. Local work is safe to allow when nothing names
+ * credentials, an unrecoverable delete, privilege, or an outbound destination.
+ */
+function uncertain(
+  verdict: AutoVerdict,
+  opts: Required<Options>,
+  action: string,
+  facts: TrustFacts | undefined,
+  bits: string,
+  resource: string,
+): AutoDecision {
+  const stop = (reason: string): AutoDecision => ({ effect: "deny", rule: "Uncertain", reason: `${reason} ${bits}` })
+  if (verdict.destructive >= INTENT_THRESHOLD) return stop("The action may destroy data and the verdict was uncertain.")
+  if (verdict.secretExposure >= TIERED_SECRET_CEILING) return stop("The action may expose credentials and the verdict was uncertain.")
+  if (verdict.category === "privileged") return stop("The action is privileged and the verdict was uncertain.")
+  if (action === "shell" && GIT_MUTATION.test(resource)) return stop("The git command rewrites state and the verdict was uncertain.")
+
+  const located = facts?.known === true && facts?.inside === true
+  const categoryOk = verdict.category === undefined || TIERED_CATEGORIES.has(verdict.category)
+  if (located) {
+    // A network command still needs a read-only allow match to clear; a local
+    // one does not.
+    if (verdict.category !== "network" && categoryOk) {
+      return { effect: "allow", reason: `Uncertain, but the action stays inside the trusted environment. ${bits}` }
+    }
+    if (ruleName(verdict.allowRule) === "Read-Only HTTP") {
+      return { effect: "allow", rule: "Read-Only HTTP", reason: `Uncertain, but a read-only request to the repository's remote. ${bits}` }
+    }
+  }
+  if (opts.failMode !== "closed") {
+    return { effect: "ask", rule: "Uncertain", reason: `The classifier was too uncertain to allow this action. ${bits}` }
+  }
+  return stop("The classifier was too uncertain to allow this action.")
 }
 
 export type Coverage = "classify" | "allow" | "passthrough"
@@ -133,11 +243,14 @@ export function autoAuthority(incoming: "allow" | "ask" | "deny", decision: Auto
   // A user ask rule is their stated intent to be prompted; leave the prompt.
   if (ctx.userAskRule && incoming === "ask") return { effect: "ask" }
   if (decision.effect === "deny") return { effect: "deny", message: denyMessage(decision) }
+  // An ask is a review request, not a block: raise a would-be auto-approval to
+  // a prompt rather than denying it.
+  if (decision.effect === "ask") return { effect: "ask", message: decision.rule ? denyMessage(decision) : undefined }
   if (ctx.pausePrompts) return { effect: incoming }
   return { effect: "allow" }
 }
 
-/** Format a denial the way auto-mode reports it: `[auto-classifier] [Rule] reason`. */
+/** Format a decision the way auto-mode reports it: `[auto-classifier] [Rule] reason`. */
 export function denyMessage(decision: AutoDecision): string {
   const tag = decision.rule ? `[${decision.rule}] ` : ""
   return `[auto-classifier] ${tag}${decision.reason}`

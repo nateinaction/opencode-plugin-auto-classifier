@@ -96,9 +96,158 @@ test("reaching outside the trust boundary denies only when it also carries risk"
   assert.equal(decideAuto(verdict({ trustExternal: 0.9, destructive: 0.6 }), opts()).effect, "deny")
 })
 
+test("a matched allow rule outranks scope and trust", () => {
+  // `pytest -q scripts/tests/test_migrate_usaa.py` in the 2026-10-17 log:
+  // allow=Local Operations, secret=60%, scope=65% — denied anyway.
+  const d = decideAuto(
+    verdict({ allowRule: "Local Operations", secretExposure: 0.6, scopeEscalation: 0.65, trustExternal: 0.27 }),
+    opts(),
+  )
+  assert.equal(d.effect, "allow")
+  assert.equal(d.rule, "Local Operations")
+  // Read-Only HTTP on an in-repo `gh issue view`: same.
+  assert.equal(
+    decideAuto(verdict({ allowRule: "Read-Only HTTP", secretExposure: 0.55, scopeEscalation: 0.6 }), opts()).effect,
+    "allow",
+  )
+})
+
+test("a generic allow rule does not clear a credential block", () => {
+  // `cat .env` with both `Local Operations` and `Credential Printing` matched:
+  // the secret ceiling keeps the allow entry from clearing the block.
+  const d = decideAuto(
+    verdict({ softDenyRule: "Credential Printing", allowRule: "Local Operations", secretExposure: 0.9 }),
+    opts(),
+  )
+  assert.equal(d.effect, "deny")
+  assert.equal(d.rule, "Credential Printing")
+})
+
+test("a hard rule is not cleared by an allow rule", () => {
+  const d = decideAuto(verdict({ hardDenyRule: "Data Exfiltration", allowRule: "Local Operations" }), opts())
+  assert.equal(d.effect, "deny")
+  assert.equal(d.rule, "Data Exfiltration")
+})
+
+test("resolved trust overrides an external claim for local work", () => {
+  // The model said external, but every path is inside the repo or scratch dir.
+  const local = decideAuto(verdict({ trustExternal: 0.9, secretExposure: 0.7 }), opts(), "shell", {
+    inside: true,
+    known: true,
+  })
+  assert.equal(local.effect, "allow")
+  // A network command is still judged by the model.
+  assert.equal(
+    decideAuto(verdict({ category: "network", trustExternal: 0.9, secretExposure: 0.7 }), opts(), "shell", {
+      inside: true,
+      known: true,
+    }).rule,
+    "External",
+  )
+})
+
+test("an in-root read is not denied for escaping the task's scope", () => {
+  // `head -30 /…/T/opencode/ting-research/...`: inside the scratch directory,
+  // scope 73%, secret 59%, no allow rule.
+  const d = decideAuto(verdict({ category: "read", scopeEscalation: 0.73, secretExposure: 0.59 }), opts(), "shell", {
+    inside: true,
+    known: true,
+  })
+  assert.equal(d.effect, "allow")
+})
+
+test("local work is not scope-checked even with no allow rule", () => {
+  const inside = { inside: true, known: true }
+  // `pytest -q scripts/tests/test_migrate_usaa.py`: allow=none, scope=65%, secret=60%.
+  assert.equal(
+    decideAuto(verdict({ category: "build", scopeEscalation: 0.65, secretExposure: 0.6 }), opts(), "shell", inside, "pytest -q scripts/tests/test_migrate_usaa.py").effect,
+    "allow",
+  )
+  // A push still escalates: it leaves the machine.
+  assert.equal(
+    decideAuto(verdict({ category: "vcs", scopeEscalation: 0.7, secretExposure: 0.6 }), opts(), "shell", inside, "git push origin main").rule,
+    "Scope Escalation",
+  )
+  // A destructive action still escalates.
+  assert.equal(
+    decideAuto(verdict({ category: "write", scopeEscalation: 0.7, destructive: 0.6 }), opts(), "shell", inside, "rm -rf build").rule,
+    "Scope Escalation",
+  )
+  // So does a credential-shaped read: `cat .env` is not saved by location.
+  assert.equal(
+    decideAuto(verdict({ category: "read", scopeEscalation: 0.7, secretExposure: 0.9 }), opts(), "shell", inside, "cat .env").rule,
+    "Scope Escalation",
+  )
+})
+
+test("a sensitive read outside the trusted roots asks instead of denying", () => {
+  const outside = { inside: false, known: true }
+  assert.equal(
+    decideAuto(verdict({ category: "read", trustExternal: 0.85, secretExposure: 0.71 }), opts(), "shell", outside).effect,
+    "ask",
+  )
+  // Scope escalation does not pre-empt the prompt for an outside read.
+  assert.equal(
+    decideAuto(verdict({ category: "read", trustExternal: 0.85, scopeEscalation: 0.8, secretExposure: 0.71 }), opts(), "shell", outside).effect,
+    "ask",
+  )
+  // A write outside is still a deny.
+  assert.equal(
+    decideAuto(verdict({ category: "write", trustExternal: 0.85, secretExposure: 0.71 }), opts(), "shell", outside).rule,
+    "External",
+  )
+})
+
+test("a tiered uncertain verdict allows local work and stops at the dangerous cases", () => {
+  const inside = { inside: true, known: true }
+  // `pytest`, `tail`, `echo` with secret 50-70%: the dominant false denial.
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "build", secretExposure: 0.6 }), opts(), "shell", inside).effect, "allow")
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "read", secretExposure: 0.7 }), opts(), "shell", inside).effect, "allow")
+  // Destructive, credential-shaped, or privileged answers are not settled by location.
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "write", destructive: 0.6 }), opts(), "shell", inside).rule, "Uncertain")
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "read", secretExposure: 0.9 }), opts(), "shell", inside).rule, "Uncertain")
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "privileged" }), opts(), "shell", inside).rule, "Uncertain")
+  // A network command with no read-only allow match stays denied; the repo's
+  // own read-only API call is allowed.
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "network", secretExposure: 0.1 }), opts(), "shell", inside).rule, "Uncertain")
+  assert.equal(
+    decideAuto(verdict({ uncertain: true, category: "network", allowRule: "Read-Only HTTP" }), opts(), "shell", inside).effect,
+    "allow",
+  )
+  // Outside the roots the facts cannot rescue it.
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "build", secretExposure: 0.6 }), opts(), "shell", { inside: false, known: true }).rule, "Uncertain")
+  // A git command that rewrites state is not settled by location; a read is.
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "vcs" }), opts(), "shell", inside, "git status --short").effect, "allow")
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "vcs" }), opts(), "shell", inside, "git push origin main").rule, "Uncertain")
+  // A process install can run arbitrary code, so it is not tiered-allow.
+  assert.equal(decideAuto(verdict({ uncertain: true, category: "process" }), opts(), "shell", inside).rule, "Uncertain")
+})
+
+test("a tiered uncertain verdict asks when failMode is open", () => {
+  const d = decideAuto(verdict({ uncertain: true, category: "build" }), opts({ failMode: "open" }), "shell", {
+    inside: false,
+    known: true,
+  })
+  assert.equal(d.effect, "ask")
+  assert.equal(d.rule, "Uncertain")
+})
+
+test("tiered is the auto-mode default and accept remains available", () => {
+  assert.equal(opts().onUncertain, "tiered")
+  assert.equal(normalize({}).onUncertain, "fallback")
+  assert.equal(opts({ onUncertain: "accept" }).onUncertain, "accept")
+})
+
 test("the reason records the source", () => {
   assert.match(decideAuto(verdict({ destructive: 0.98, source: "fallback" }), opts()).reason, /via=fallback/)
 })
+
+test("authority raises a would-be allow to a prompt for an ask", () => {
+  const out = autoAuthority("allow", { effect: "ask", rule: "External", reason: "read outside" }, { userAskRule: false, pausePrompts: false })
+  assert.equal(out.effect, "ask")
+  assert.match(out.message ?? "", /\[External\] read outside/)
+})
+
 
 test("coverage routes each action to classify, allow, or passthrough", () => {
   assert.equal(coverageFor("read", false), "allow")

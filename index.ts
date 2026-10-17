@@ -28,14 +28,17 @@
 //   "jev" (default) -> https://opencode.ai/zen/v1/systemone (key: OPENCODE_API_KEY)
 //   "openrouter"    -> https://openrouter.ai/api/alpha/decisions (key: OPENROUTER_API_KEY)
 
+import { execFile } from "node:child_process"
 import { appendFile, mkdir, readFile, realpath } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
+import { promisify } from "node:util"
 
 import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "./jev.ts"
 import { JevClassifierRpc } from "./rpc.ts"
 import { buildLabel, commitFromLock } from "./build.ts"
 import { buildAutoPrompt, buildVerdictPrompt, parseAutoVerdict, parseVerdict } from "./verdict.ts"
+import { resolveTrust } from "./trust.ts"
 import {
   decide,
   describe,
@@ -235,6 +238,51 @@ export default {
       () => [scratch],
     )
 
+    // Everything the plugin can prove is inside the trust boundary: the working
+    // directory, the scratch directory, and every worktree of the repository.
+    // Shared with `git worktree list`'s output, which a session may not own but
+    // the same repository does. Each path is added under its literal and
+    // canonical spelling, because macOS reaches the temp dir through both.
+    const execFileAsync = promisify(execFile)
+    async function canonicalRoots(paths: string[]): Promise<string[]> {
+      const out = new Set<string>()
+      for (const path of paths) {
+        if (!path) continue
+        out.add(resolve(path))
+        try {
+          out.add(await realpath(path))
+        } catch {
+          // Not created yet (or not a directory): the literal name still matches.
+        }
+      }
+      return [...out]
+    }
+
+    // Bounded: a repository can carry many worktrees, and a session needs the
+    // ones it might touch, not an unbounded list from a hostile checkout.
+    const WORKTREE_LIMIT = 32
+    async function worktreeRoots(dir: string): Promise<string[]> {
+      try {
+        const { stdout } = await execFileAsync("git", ["-C", dir, "worktree", "list", "--porcelain"], {
+          timeout: 2000,
+          maxBuffer: 64 * 1024,
+        })
+        return stdout
+          .split("\n")
+          .filter((line) => line.startsWith("worktree "))
+          .map((line) => line.slice("worktree ".length).trim())
+          .filter(Boolean)
+          .slice(0, WORKTREE_LIMIT)
+      } catch (error) {
+        // Not a git repository, or git is unavailable: the working directory
+        // and scratch directory are still trusted roots.
+        log("git worktree list failed", String(error).slice(0, 120))
+        return []
+      }
+    }
+
+    const trustedRoots = await canonicalRoots([baseDir(), ...scratchDirs, ...(await worktreeRoots(baseDir()))])
+
     // The latest user message plus the ones before it, so a terse reply
     // ("continue") carries the request it answers. Only the user's own words:
     // assistant text would let the agent argue for its own actions.
@@ -344,11 +392,13 @@ export default {
       }
 
       // Confidence-gated routing: `onUncertain` decides what an inconclusive
-      // verdict becomes. "accept" leaves Jev's own answers to decide.
+      // verdict becomes. "accept" leaves Jev's own answers to decide; "tiered"
+      // lets the deterministic facts decide, so a missing fallback model cannot
+      // deny a local test run.
       if (belowConfidence(verdict, opts.confidenceFloor, opts, action)) {
         // A fallback's verdict replaces this one; keep it for diagnosis.
         log("inconclusive", JSON.stringify({ action, onUncertain: opts.onUncertain, verdict }))
-        if (opts.onUncertain === "deny") verdict = { ...verdict, uncertain: true }
+        if (opts.onUncertain === "deny" || opts.onUncertain === "tiered") verdict = { ...verdict, uncertain: true }
         else if (opts.onUncertain === "fallback") verdict = await fallbackForUncertain(verdict, state, action)
       }
 
@@ -377,16 +427,16 @@ export default {
     }
 
     async function classifyAutoAll(
-      items: Array<{ label: string; state: string; action: string }>,
+      items: Array<{ label: string; state: string; action: string; trust: ReturnType<typeof resolveTrust> }>,
       signal?: AbortSignal,
     ): Promise<AutoDecision> {
       let worst: AutoDecision = { effect: "allow", reason: "" }
       for (const item of items) {
         const verdict = await classifyAuto(item.state, item.action, signal)
-        const decision = decideAuto(verdict, opts, item.action)
+        const decision = decideAuto(verdict, opts, item.action, item.trust, item.label)
         log(
           "classified",
-          JSON.stringify({ mode: "auto", resource: item.label, effect: decision.effect, rule: decision.rule, verdict }),
+          JSON.stringify({ mode: "auto", resource: item.label, effect: decision.effect, rule: decision.rule, trust: item.trust, verdict }),
         )
         recordEntry({
           at: Date.now(),
@@ -397,8 +447,10 @@ export default {
           via: verdict.source ?? "jev",
           rule: decision.rule,
         })
+        // The first deny settles every part of the command; otherwise keep the
+        // most severe outcome, so an ask is not overwritten by a later allow.
         if (decision.effect === "deny") return decision
-        worst = decision
+        if (rank(decision.effect) > rank(worst.effect)) worst = decision
       }
       return worst
     }
@@ -413,20 +465,25 @@ export default {
       return false
     }
 
-    async function hasUserAskRule(action: string, resources: string[]): Promise<boolean> {
-      if (typeof ctx.permission?.list !== "function") return false
+    // A user's own `allow` rule is their stated intent, and auto-mode must not
+    // deny over it. The shipped base policy is `{"action":"*","resource":"*"}`
+    // and says nothing, so it is excluded; a saved "allow always" approval and
+    // a repo `permissions` entry both match by exact action and pattern.
+    async function userRules(action: string, resources: string[]): Promise<{ ask: boolean; allow: boolean }> {
+      const none = { ask: false, allow: false }
+      if (typeof ctx.permission?.list !== "function") return none
       try {
         const listed = await ctx.permission.list()
         const rules: any[] = Array.isArray(listed) ? listed : Array.isArray(listed?.rules) ? listed.rules : []
-        return rules.some(
-          (rule) =>
-            rule?.effect === "ask" &&
-            rule?.action === action &&
-            resources.some((resource) => matchRule(rule?.resource, resource)),
-        )
+        const matches = (rule: any): boolean =>
+          rule?.action === action && resources.some((resource) => matchRule(rule?.resource, resource))
+        return {
+          ask: rules.some((rule) => rule?.effect === "ask" && matches(rule)),
+          allow: rules.some((rule) => rule?.effect === "allow" && rule?.resource !== "*" && matches(rule)),
+        }
       } catch (error) {
         log("permission.list failed", String(error))
-        return false
+        return none
       }
     }
 
@@ -503,7 +560,17 @@ export default {
       const session = blockState(event.sessionID)
       const pause = reachedPause(session.consecutive, session.total, opts)
       // A user ask rule only matters when OpenCode is already prompting.
-      const userAsk = incoming === "ask" ? await hasUserAskRule(action, resources) : false
+      const user = await userRules(action, resources)
+      const userAsk = incoming === "ask" ? user.ask : false
+
+      // An explicit user allow rule is their policy; the classifier does not
+      // second-guess it. Without this, a repo `permissions` allowlist changed
+      // nothing in auto-mode. Never lower an explicit deny or a user ask rule.
+      if (user.allow && incoming !== "deny" && !userAsk) {
+        log("user allow rule", JSON.stringify({ action, resources: resources.slice(0, 4) }))
+        event.effect = "allow"
+        return
+      }
 
       if (coverage === "allow") {
         // Auto-allow read-only tools, but honor a user's ask rule and stop once
@@ -521,6 +588,7 @@ export default {
       const items = resources.map((resource) => ({
         label: resource,
         action,
+        trust: resolveTrust(action, resource, trustedRoots, baseDir()),
         state: buildState({
           mode: opts.conversationContext,
           instructions: instructionText,

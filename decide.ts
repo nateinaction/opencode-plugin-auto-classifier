@@ -8,7 +8,7 @@
 import type { RuleLists } from "./rules.ts"
 
 export type FailMode = "open" | "closed"
-export const UNCERTAIN_POLICIES = ["fallback", "accept", "deny"] as const
+export const UNCERTAIN_POLICIES = ["tiered", "fallback", "accept", "deny"] as const
 export type UncertainPolicy = (typeof UNCERTAIN_POLICIES)[number]
 
 /** Where Jev is served: OpenCode Zen ("jev") or OpenRouter ("openrouter"). */
@@ -31,9 +31,12 @@ export type Options = {
   /** auto-mode: a decision-relevant answer below this is uncertain (see `onUncertain`). */
   confidenceFloor?: number
   /**
-   * auto-mode: what an uncertain Jev verdict becomes. "fallback" asks the LLM
-   * fallback, "accept" acts on Jev's own answers, "deny" blocks the action.
-   * Jev failing outright is governed by `fallback` and `failMode` instead.
+   * auto-mode: what an uncertain Jev verdict becomes. "tiered" (the auto-mode
+   * default) lets the deterministic facts decide: local work allows, while a
+   * destructive, credential-bearing, privileged, or outbound action does not.
+   * "fallback" asks the LLM fallback, "accept" acts on Jev's own answers, and
+   * "deny" blocks the action. Jev failing outright is governed by `fallback`
+   * and `failMode` instead.
    */
   onUncertain?: UncertainPolicy
   /** auto-mode: stop classifying and resume prompting after this many blocks. */
@@ -189,6 +192,9 @@ export function normalize(options: Options): Required<Options> {
   merged.repeatBlocks = { ...DEFAULTS.repeatBlocks, ...(options.repeatBlocks ?? {}) }
   // auto-mode denies an action it cannot classify unless the user chose otherwise.
   if (merged.mode === "auto-mode" && options.failMode === undefined) merged.failMode = "closed"
+  // An uncertain answer is decided by the facts in auto-mode: a broken fallback
+  // model must not turn a local `pytest` run into a denial.
+  if (merged.mode === "auto-mode" && options.onUncertain === undefined) merged.onUncertain = "tiered"
   // A misspelled policy must not act on uncertain verdicts as "accept" would.
   if (!UNCERTAIN_POLICIES.includes(merged.onUncertain)) merged.onUncertain = "deny"
   // auto-mode leaves deletion to its rules and the user's stated intent. Jev

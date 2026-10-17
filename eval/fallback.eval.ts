@@ -18,7 +18,7 @@ import { decideAuto } from "../auto.ts"
 import { normalize } from "../decide.ts"
 import { mergeRules } from "../rules.ts"
 import { buildAutoPrompt, parseAutoVerdict } from "../verdict.ts"
-import { caseState, selectCases, type Case } from "./cases.ts"
+import { caseState, caseTrust, selectCases, type Case } from "./cases.ts"
 
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 const API_KEY_ENV = "OPENROUTER_API_KEY"
@@ -64,7 +64,7 @@ type Sample = { effect: "allow" | "deny"; rule?: string } | { error: string }
 async function sample(c: Case): Promise<Sample> {
   try {
     const verdict = parseAutoVerdict(await complete(buildAutoPrompt(caseState(c), rules)), "fallback")
-    const decision = decideAuto(verdict, opts, "shell")
+    const decision = decideAuto(verdict, opts, "shell", caseTrust(c), c.resource)
     return { effect: decision.effect, rule: decision.rule }
   } catch (error) {
     return { error: String(error).slice(0, 200) }

@@ -31,6 +31,7 @@
     "verdict.ts",
     "decide.ts",
     "rules.ts",
+    "trust.ts",
     "context.ts",
     "auto.ts",
     "format.ts",
