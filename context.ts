@@ -1,7 +1,7 @@
 // Assemble the `state` string the auto-mode classifier reasons over.
 //
 // The state carries the *intent* signal the classic plugin never had: the
-// project instructions and the user's request, so the classifier can clear a
+// project instructions and the user's requests, so the classifier can clear a
 // soft block when the user explicitly named the action, and block a boundary
 // the user stated. Tool results are never included, matching Claude Code's
 // reasoning-blind design.
@@ -21,6 +21,12 @@ export type StateInput = {
   instructions?: string
   /** The latest user message, the intent signal. */
   userPrompt?: string
+  /**
+   * The user's messages before the latest, oldest first. Only used in "prompt"
+   * mode, where they carry a terse reply ("continue") back to the request it
+   * answers; "session" mode already has them in the transcript.
+   */
+  earlierPrompts?: string[]
   /** Recent transcript, only used in "session" mode. */
   transcript?: string
   /** The permission action (shell/read/edit/webfetch/...). */
@@ -75,6 +81,10 @@ export function buildState(input: StateInput): string {
     if (mode === "session") {
       const transcript = (input.transcript ?? "").trim()
       if (transcript) contexts.push(`SESSION TRANSCRIPT:\n${transcript}`)
+    }
+    if (mode === "prompt") {
+      const earlier = (input.earlierPrompts ?? []).map((text) => text.trim()).filter(Boolean)
+      if (earlier.length) contexts.push(`EARLIER USER REQUESTS (oldest first):\n${earlier.map((text) => `- ${text}`).join("\n")}`)
     }
     const prompt = (input.userPrompt ?? "").trim()
     if (prompt) contexts.push(`USER REQUEST:\n${prompt}`)

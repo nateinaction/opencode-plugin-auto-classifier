@@ -180,7 +180,7 @@ passed through the object form:
 | ------------------ | ---------------- | ------------------------------------------------------------- |
 | `mode`             | `classic`        | `auto-mode` emulates Claude Code's auto classifier (see below) |
 | `rules`            | `{}`             | auto-mode rule lists: `environment`/`allow`/`soft_deny`/`hard_deny` |
-| `conversationContext` | `prompt`      | auto-mode context sent: `none` / `prompt` (request + AGENTS.md) / `session` |
+| `conversationContext` | `prompt`      | auto-mode context sent: `none` / `prompt` (last 3 user messages + AGENTS.md) / `session` |
 | `confidenceFloor`  | `0.6`            | auto-mode: below this, an answer routes to the LLM fallback   |
 | `repeatBlocks`     | `{3, 20}`        | auto-mode: consecutive/total blocks before prompting resumes  |
 | `provider`         | `jev`            | where Jev is served: `jev` (OpenCode Zen) or `openrouter`     |

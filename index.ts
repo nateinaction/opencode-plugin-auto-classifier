@@ -213,9 +213,9 @@ export default {
 
     const autoQuestions = buildAutoQuestions(rules)
 
-    // Per-session context, cached briefly. The user prompt is the intent signal
-    // and does not change within a turn.
-    const promptCache = new Map<string, { at: number; text: string }>()
+    // Per-session context, cached briefly. The user prompts are the intent
+    // signal and do not change within a turn.
+    const promptCache = new Map<string, { at: number; prompts: string[] }>()
     const instructionsCache = new Map<string, { at: number; text: string }>()
     const PROMPT_TTL = 30_000
     const INSTRUCTIONS_TTL = 5 * 60_000
@@ -226,26 +226,32 @@ export default {
       return typeof dir === "string" && dir ? dir : process.cwd()
     }
 
-    async function userPrompt(sessionID: string): Promise<string | undefined> {
-      if (!sessionID) return undefined
+    // The latest user message plus the ones before it, so a terse reply
+    // ("continue") carries the request it answers. Only the user's own words:
+    // assistant text would let the agent argue for its own actions.
+    const PROMPT_COUNT = 3
+    const EARLIER_PROMPT_CHARS = 1000
+
+    /** The session's last PROMPT_COUNT user messages, oldest first; empty when unavailable. */
+    async function userPrompts(sessionID: string): Promise<string[]> {
+      if (!sessionID) return []
       const hit = promptCache.get(sessionID)
       const now = Date.now()
-      if (hit && now - hit.at < PROMPT_TTL) return hit.text || undefined
+      if (hit && now - hit.at < PROMPT_TTL) return hit.prompts
       try {
         const messages = await ctx.session.context({ sessionID })
-        let text = ""
-        for (let i = messages.length - 1; i >= 0; i--) {
+        const prompts: string[] = []
+        for (let i = messages.length - 1; i >= 0 && prompts.length < PROMPT_COUNT; i--) {
           const message = messages[i]
-          if (message?.type === "user" && typeof message.text === "string") {
-            text = message.text
-            break
+          if (message?.type === "user" && typeof message.text === "string" && message.text.trim()) {
+            prompts.unshift(message.text)
           }
         }
-        promptCache.set(sessionID, { at: now, text })
-        return text || undefined
+        promptCache.set(sessionID, { at: now, prompts })
+        return prompts
       } catch (error) {
         log("session.context failed", String(error))
-        return undefined
+        return []
       }
     }
 
@@ -468,7 +474,9 @@ export default {
       }
 
       const instructionText = opts.conversationContext === "none" ? undefined : await instructions()
-      const promptText = opts.conversationContext === "none" ? undefined : await userPrompt(event.sessionID)
+      const prompts = opts.conversationContext === "none" ? [] : await userPrompts(event.sessionID)
+      const promptText = prompts.at(-1)
+      const earlierPrompts = prompts.slice(0, -1).map((text) => text.slice(0, EARLIER_PROMPT_CHARS))
       const transcriptText = opts.conversationContext === "session" ? await sessionTranscript(event.sessionID) : undefined
       const items = resources.map((resource) => ({
         label: resource,
@@ -477,6 +485,7 @@ export default {
           mode: opts.conversationContext,
           instructions: instructionText,
           userPrompt: promptText,
+          earlierPrompts,
           transcript: transcriptText,
           action,
           resource,
