@@ -113,32 +113,6 @@ export function coverageFor(action: string, external: boolean): Coverage {
   return "passthrough"
 }
 
-/**
- * Commands that, given only short flags and counts, read stdin and write stdout
- * and touch nothing else. None of their short flags names a file to write.
- */
-const STDIN_FILTERS = new Set(["head", "tail", "wc", "uniq", "cat", "tac", "nl"])
-/** Anything beyond words, spaces, `+`, and `-`: paths, quotes, redirects, expansions. */
-const SHELL_SYNTAX = /[^\w\s+-]/
-const FLAG = /^-[A-Za-z0-9]+$/
-const COUNT = /^\+?\d+$/
-
-/**
- * True for a bare stream filter such as `tail -40` or `head -n 5`. OpenCode
- * classifies each part of a pipeline separately, and a filter part judged on
- * its own inherits the sensitivity of the whole command; but it reads only the
- * output of the part before it, which is classified itself, so it can expose
- * nothing that part did not. Fails closed: any file argument, long option,
- * redirect, or other shell syntax leaves the part to the classifier.
- */
-export function isStdinFilter(resource: string): boolean {
-  if (SHELL_SYNTAX.test(resource)) return false
-  const [name, ...args] = resource.trim().split(/\s+/)
-  if (!STDIN_FILTERS.has(name)) return false
-  // A count is only a flag's value (`-n 5`); on its own it would name a file.
-  return args.every((arg, i) => FLAG.test(arg) || (COUNT.test(arg) && i > 0 && FLAG.test(args[i - 1])))
-}
-
 export type AuthorityContext = {
   /** OpenCode has a user-configured `ask` rule for this action/resource. */
   userAskRule: boolean

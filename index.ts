@@ -54,7 +54,6 @@ import {
   autoAuthority,
   belowConfidence,
   coverageFor,
-  isStdinFilter,
   decideAuto,
   reachedPause,
   type AutoDecision,
@@ -513,20 +512,13 @@ export default {
         return
       }
 
-      // Bare stream filters (`| tail -40`) are judged by the part feeding them.
-      const toClassify = action === "shell" ? resources.filter((resource) => !isStdinFilter(resource)) : resources
-      if (toClassify.length === 0) {
-        if (!userAsk && !pause) event.effect = "allow"
-        return
-      }
-
       const instructionText = opts.conversationContext === "none" ? undefined : await instructions()
       const prompts = opts.conversationContext === "none" ? [] : await userPrompts(event.sessionID)
       const promptText = prompts.at(-1)
       const earlierPrompts = prompts.slice(0, -1).map((text) => text.slice(0, EARLIER_PROMPT_CHARS))
       const transcriptText = opts.conversationContext === "session" ? await sessionTranscript(event.sessionID) : undefined
       const command = action === "shell" && event.source?.type === "tool" ? shellCommands.get(event.source.id) : undefined
-      const items = toClassify.map((resource) => ({
+      const items = resources.map((resource) => ({
         label: resource,
         action,
         state: buildState({
