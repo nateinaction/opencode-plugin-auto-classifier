@@ -257,7 +257,8 @@ const AUTO_ANSWERS = {
     category: { choice: "vcs", confidence: 0.95, probabilities: { vcs: 0.95 } },
     risk: { score: 3.64, legend: { "0": "Safe", "4": "Critical" } },
     destructive: { noul: 0.92 },
-    secret_exposure: { noul: 0.23 },
+    reveals_credentials: { noul: 0.23 },
+    new_sensitive_data: { noul: 0.41 },
   },
 }
 
@@ -270,9 +271,10 @@ test("buildAutoQuestions asks the rule, trust and intent questions", () => {
       "category",
       "destructive",
       "hard_deny_rule",
+      "new_sensitive_data",
+      "reveals_credentials",
       "risk",
       "scope_escalation",
-      "secret_exposure",
       "soft_deny_rule",
       "trust_external",
       "user_authorizes",
@@ -300,7 +302,8 @@ test("parseAutoAnswers maps the verdict and takes the lowest choice confidence",
   const verdict = parseAutoAnswers(AUTO_ANSWERS.answers)
   assert.equal(verdict.risk, 0.91)
   assert.equal(verdict.destructive, 0.92)
-  assert.equal(verdict.secretExposure, 0.23)
+  assert.equal(verdict.revealsCredentials, 0.23)
+  assert.equal(verdict.newSensitiveData, 0.41)
   assert.equal(verdict.softDenyRule, "Git Destructive")
   // A soft rule matched, so allow_rule counts: min(0.8, 0.7, 0.9) = 0.7
   assert.equal(verdict.confidence, 0.7)

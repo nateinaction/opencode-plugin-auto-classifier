@@ -19,8 +19,10 @@ export type AutoVerdict = {
   risk: number
   /** 0..1 probability of irreversible data/system damage. */
   destructive: number
-  /** 0..1 probability of leaking secrets or credentials. */
-  secretExposure: number
+  /** 0..1 probability the action reveals a live credential (key, token, password, .env). */
+  revealsCredentials: number
+  /** 0..1 probability the action surfaces sensitive data the session did not already have. */
+  newSensitiveData: number
   /** Matched hard-deny rule label, or undefined/"none". */
   hardDenyRule?: string
   /** Matched soft-deny rule label, or undefined/"none". */
@@ -41,6 +43,8 @@ export type AutoVerdict = {
   choiceConfidence?: Record<string, number>
   /** Too uncertain to act on, and `onUncertain` is "deny". */
   uncertain?: boolean
+  /** The verbatim user words a fallback cited for `userForbids`, when it did. */
+  boundaryQuote?: string
   source?: string
 }
 
@@ -51,13 +55,6 @@ export const INTENT_THRESHOLD = 0.5
 
 /** A yes/no answer within this band of the threshold is too close to call. */
 export const AMBIGUOUS_BAND = 0.1
-
-/**
- * Above this, a verdict names credentials or data leaving the machine, so even
- * an uncertain answer is not settled by the facts. Jev's secret_exposure for
- * ordinary local work sits at 0.5-0.7; .env and key material sit near 0.9.
- */
-export const TIERED_SECRET_CEILING = 0.8
 
 /** Categories an uncertain, in-root action may hold and still be allowed. */
 const TIERED_CATEGORIES = new Set(["read", "build", "write", "vcs", "other"])
@@ -94,8 +91,8 @@ export function decideAuto(
   facts?: TrustFacts,
   resource = "",
 ): AutoDecision {
-  const { category, risk, destructive, secretExposure } = verdict
-  const bits = `risk=${pct(risk)} destructive=${pct(destructive)} secret=${pct(secretExposure)} via=${verdict.source ?? "jev"}`
+  const { category, risk, destructive, revealsCredentials, newSensitiveData } = verdict
+  const bits = `risk=${pct(risk)} destructive=${pct(destructive)} credentials=${pct(revealsCredentials)} new-data=${pct(newSensitiveData)} via=${verdict.source ?? "jev"}`
   const deny = (rule: string | undefined, reason: string): AutoDecision => ({ effect: "deny", rule, reason: `${reason} ${bits}` })
   const allow = (rule: string | undefined, reason: string): AutoDecision => ({ effect: "allow", rule, reason: `${reason} ${bits}` })
 
@@ -108,18 +105,27 @@ export function decideAuto(
   // worktree, an external claim cannot stand.
   const outbound = action === "webfetch" || action === "websearch" || category === "network"
   const located = facts?.known === true
+  const external = outbound || !located ? yes(verdict.trustExternal) : facts?.inside !== true
+  // A credential is an exposure wherever it goes. Sensitive data the session
+  // did not already have is an exposure only once the action carries it out of
+  // the environment; Jev's old scalar called ordinary local `pytest` and
+  // `tail` runs 50-70% risky, and every one of them became a false denial.
+  const credentials = yes(revealsCredentials)
+  // A push carries the data off the machine even to a trusted remote, so it
+  // counts as leaving for the purpose of new data.
+  const leaving = outbound || external || GIT_PUSH.test(resource)
+  const exposed = credentials || (yes(newSensitiveData) && leaving)
   // A local action that neither leaves the machine nor destroys data cannot
   // cross a task boundary in a way worth denying: an unrequested `pytest` or
   // `tail` is not a safety event. Scope stays meaningful for pushes, network
-  // sends, and destructive actions.
+  // sends, destructive actions, and credentials.
   const localSafe =
     located &&
     facts?.inside === true &&
     !outbound &&
     destructive < INTENT_THRESHOLD &&
-    secretExposure < TIERED_SECRET_CEILING &&
+    !credentials &&
     !GIT_PUSH.test(resource)
-  const external = outbound || !located ? yes(verdict.trustExternal) : facts?.inside !== true
 
   if (verdict.uncertain) return uncertain(verdict, opts, action, facts, bits, resource)
 
@@ -128,23 +134,23 @@ export function decideAuto(
   const soft = ruleName(verdict.softDenyRule)
   if (soft) {
     // A generic allow entry cannot clear a block on a credential-shaped action;
-    // the secret ceiling keeps `.env` from riding `Local Operations` through.
-    const clears = Boolean(ruleName(verdict.allowRule)) && secretExposure < TIERED_SECRET_CEILING
+    // the credential answer keeps `.env` from riding `Local Operations` through.
+    const clears = Boolean(ruleName(verdict.allowRule)) && !credentials
     if (!clears && !yes(verdict.userAuthorizes)) return deny(soft, `Matched soft rule [${soft}].`)
   }
 
   // A matched allow exception is the user's own rule list saying this action is
   // permitted. It outranks scope and trust, which are advisory guesses about
   // intent; before this, 37 of 57 denials matched an allow rule and were denied
-  // anyway by the sensitivity gate.
+  // anyway by the sensitivity gate. Credentials stay a block of their own.
   const allowed = ruleName(verdict.allowRule)
-  if (allowed && secretExposure < TIERED_SECRET_CEILING) return allow(allowed, `Matched allow rule [${allowed}].`)
+  if (allowed && !credentials) return allow(allowed, `Matched allow rule [${allowed}].`)
 
-  // Scope and trust only block an action that also carries a sensitive effect.
-  // The user's request clears soft blocks; on its own it is no reason to deny.
-  // A terse request ("@skill 125") never names the many harmless commands an
+  // Scope and trust only block an action that also carries an exposure. The
+  // user's request clears soft blocks; on its own it is no reason to deny. A
+  // terse request ("@skill 125") never names the many harmless commands an
   // agent runs to fulfil it, and local work does not cross a trust boundary.
-  const sensitive = destructive >= INTENT_THRESHOLD || secretExposure >= INTENT_THRESHOLD
+  const sensitive = destructive >= INTENT_THRESHOLD || exposed
   // A read outside the roots is a trust question, not a scope one: let the
   // external branch below turn it into a prompt.
   const outsideRead = located && facts?.inside === false && readOnly(action, verdict)
@@ -161,7 +167,7 @@ export function decideAuto(
   }
 
   if (destructive >= opts.denyDestructive) return deny("Destructive", "The action may irreversibly destroy data.")
-  if (secretExposure >= opts.denySecret) return deny("Secret Exposure", "The action may expose secrets.")
+  if (revealsCredentials >= opts.denySecret) return deny("Secret Exposure", "The action may reveal credentials.")
   if (action === "shell" && risk >= opts.denyRisk) return deny("Critical", "The command is rated critical risk.")
 
   return { effect: "allow", reason: bits }
@@ -171,9 +177,12 @@ export function decideAuto(
  * Decide an inconclusive verdict from the facts, not from the model's guesses.
  *
  * The dominant false denial in the debug logs was a local `pytest`, `grep`, or
- * `tail` run whose `secret_exposure` sat at 0.6 and whose fallback model did not
- * exist, so it failed closed. Local work is safe to allow when nothing names
+ * `tail` run whose old `secret_exposure` sat at 0.6 and whose fallback model did
+ * not exist, so it failed closed. Local work is safe to allow when nothing names
  * credentials, an unrecoverable delete, privilege, or an outbound destination.
+ * An LLM fallback's answer carries no calibrated confidence, so it arrives here
+ * marked uncertain too: its rule labels can still deny a dangerous action, but
+ * not override what the facts prove.
  */
 function uncertain(
   verdict: AutoVerdict,
@@ -184,27 +193,55 @@ function uncertain(
   resource: string,
 ): AutoDecision {
   const stop = (reason: string): AutoDecision => ({ effect: "deny", rule: "Uncertain", reason: `${reason} ${bits}` })
+  const credentials = yes(verdict.revealsCredentials)
   if (verdict.destructive >= INTENT_THRESHOLD) return stop("The action may destroy data and the verdict was uncertain.")
-  if (verdict.secretExposure >= TIERED_SECRET_CEILING) return stop("The action may expose credentials and the verdict was uncertain.")
+  if (credentials) return stop("The action may reveal credentials and the verdict was uncertain.")
   if (verdict.category === "privileged") return stop("The action is privileged and the verdict was uncertain.")
   if (action === "shell" && GIT_MUTATION.test(resource)) return stop("The git command rewrites state and the verdict was uncertain.")
 
+  // A matched allow exception is the user's own rule list, so it settles the
+  // uncertainty the same way it outranks scope and trust in `decideAuto`.
+  const allowed = ruleName(verdict.allowRule)
+  if (allowed) return { effect: "allow", rule: allowed, reason: `Uncertain, but a matched allow rule [${allowed}] covers the action. ${bits}` }
+
   const located = facts?.known === true && facts?.inside === true
   const categoryOk = verdict.category === undefined || TIERED_CATEGORIES.has(verdict.category)
-  if (located) {
-    // A network command still needs a read-only allow match to clear; a local
-    // one does not.
-    if (verdict.category !== "network" && categoryOk) {
-      return { effect: "allow", reason: `Uncertain, but the action stays inside the trusted environment. ${bits}` }
-    }
-    if (ruleName(verdict.allowRule) === "Read-Only HTTP") {
-      return { effect: "allow", rule: "Read-Only HTTP", reason: `Uncertain, but a read-only request to the repository's remote. ${bits}` }
-    }
+  // A network command still needs an allow match (handled above) to clear; a
+  // local one does not.
+  if (located && verdict.category !== "network" && categoryOk) {
+    return { effect: "allow", reason: `Uncertain, but the action stays inside the trusted environment. ${bits}` }
+  }
+  // A read-only action outside what the plugin can prove is reviewable, not
+  // forbidden; an outside read is never a reason to deny on its own.
+  if (readOnly(action, verdict)) {
+    return { effect: "ask", rule: "Uncertain", reason: `The action is read-only but outside what the plugin can prove. ${bits}` }
   }
   if (opts.failMode !== "closed") {
     return { effect: "ask", rule: "Uncertain", reason: `The classifier was too uncertain to allow this action. ${bits}` }
   }
   return stop("The classifier was too uncertain to allow this action.")
+}
+
+/**
+ * Decide a fallback's verdict against the Jev verdict it replaced.
+ *
+ * A fallback is an ordinary LLM's guess, marked at 0.5 confidence and given no
+ * per-choice confidence, so it cannot override a Jev verdict that allowed the
+ * action: the most it can do is turn that allow into a prompt. A dangerous
+ * verdict from Jev itself is never lowered here.
+ */
+export function reconcileFallback(
+  verdict: AutoVerdict,
+  jev: AutoVerdict | undefined,
+  opts: Required<Options>,
+  action = "shell",
+  facts?: TrustFacts,
+  resource = "",
+): AutoDecision {
+  const decision = decideAuto(verdict, opts, action, facts, resource)
+  if (!jev || decision.effect !== "deny") return decision
+  if (decideAuto(jev, opts, action, facts, resource).effect !== "allow") return decision
+  return { effect: "ask", rule: decision.rule, reason: `The LLM fallback would deny what Jev allowed. ${decision.reason}` }
 }
 
 export type Coverage = "classify" | "allow" | "passthrough"
@@ -258,7 +295,13 @@ export function denyMessage(decision: AutoDecision): string {
 
 /** Yes/no signals that can only clear an action (permissive) or only block it (restrictive). */
 const PERMISSIVE_SIGNALS = ["userAuthorizes"] as const
-const RESTRICTIVE_SIGNALS = ["trustExternal", "userForbids", "scopeEscalation"] as const
+const RESTRICTIVE_SIGNALS = [
+  "trustExternal",
+  "userForbids",
+  "scopeEscalation",
+  "revealsCredentials",
+  "newSensitiveData",
+] as const
 
 const ambiguous = (prob: number): boolean => Math.abs(prob - INTENT_THRESHOLD) < AMBIGUOUS_BAND
 

@@ -184,7 +184,7 @@ passed through the object form:
 | `rules`            | `{}`             | auto-mode rule lists: `environment`/`allow`/`soft_deny`/`hard_deny` |
 | `conversationContext` | `prompt`      | auto-mode context sent: `none` / `prompt` (last 3 user messages + AGENTS.md) / `session` |
 | `confidenceFloor`  | `0.6`            | auto-mode: below this, an answer is uncertain (see `onUncertain`) |
-| `onUncertain`      | `tiered` (auto-mode) | auto-mode: an uncertain Jev verdict is decided by the deterministic facts (`tiered`), goes to the LLM fallback (`fallback`), decides on Jev's own answers (`accept`), or is denied as `Uncertain` (`deny`); an unknown value denies |
+| `onUncertain`      | `tiered` (auto-mode) | auto-mode: an uncertain Jev verdict or fallback answer is decided by the deterministic facts (`tiered`), goes to the LLM fallback (`fallback`), decides on its own answers (`accept`), or is denied as `Uncertain` (`deny`); an unknown value denies |
 | `repeatBlocks`     | `{3, 20}`        | auto-mode: consecutive/total blocks before prompting resumes  |
 | `provider`         | `jev`            | where Jev is served: `jev` (OpenCode Zen) or `openrouter`     |
 | `model`            | per provider     | `jev-1.13` (jev) / `typesafe/jev-1.14` (openrouter)           |
@@ -197,7 +197,7 @@ passed through the object form:
 | `escalateTo`       | `ask`            | what escalation resolves to: `ask` or `deny`                  |
 | `escalate`         | `{}`             | per-action threshold overrides, e.g. `{"edit":{"destructive":0.5}}` |
 | `denyDestructive`  | `0.97`           | destructive >= this -> `deny` (`1.01`, off, in auto-mode)     |
-| `denySecret`       | `1.01`           | secret exposure >= this -> `deny` (off by default)            |
+| `denySecret`       | `1.01`           | classic: secret exposure; auto-mode: `reveals_credentials` >= this -> `deny` (off by default) |
 | `denyRisk`         | `1.01`           | risk >= this -> `deny` (off by default, `shell` only)         |
 | `privilegedAsk`    | `true`           | always escalate `priv`/`sudo`-style commands                  |
 | `fallback`         | `true`           | use `ctx.generate.text` when Jev fails                        |
@@ -251,25 +251,37 @@ rather than a score escalator. The differences:
   denial (`deny`). A near-50% signal that cannot change the outcome (e.g. "did
   the user authorize this?" when no soft rule matched) is not uncertain. Jev's
   uncertain verdict is written to the debug log either way.
+- **The fallback is a guess, not a verdict.** Its answers carry confidence 0.5
+  and no per-choice confidence, so they are questionable rather than final: a
+  fallback denial of something Jev itself allowed becomes a prompt, never a denial. A
+  fallback's `user_forbids` needs a verbatim `boundary_quote` from your requests
+  or the project instructions; without one it is discarded. If the fallback
+  model is unavailable, the permission message names it.
 - **Trust is resolved, not guessed.** The plugin resolves each path against the
   working directory, the scratch directory, and `git worktree list` entries of
   the repository. Inside those roots an external claim cannot stand, and a
   local, non-destructive, non-credential action is not scope-checked. The model
   still answers `trust_external` for network commands, where only it can see
   the destination.
+- **One decision per command.** OpenCode asks permission for each part of a
+  compound command separately. The plugin classifies the whole command once per
+  tool call and every part inherits that decision, so `echo ---` in a pipeline
+  is judged with the read it follows, and a dangerous part still denies the
+  whole command.
 
 Precedence (applied in code): `hard_deny` → deny; a stated boundary → deny;
 `soft_deny` → deny unless an `allow` entry matches or you named the action; a
 matched `allow` entry → allow; then scope escalation or reaching outside the
-trusted environment, which deny only an action that is also destructive or may
-expose secrets, and never a local action that is neither destructive,
-credential-bearing, nor a push; then the severity backstop. A sensitive read
-*outside* the roots asks instead of denying. Denials are labelled
+trusted environment, which deny only an action that is also destructive,
+reveals credentials, or carries new sensitive data out of the environment (a
+push counts as leaving), and never a local action that is neither destructive,
+credential-bearing, nor a push; then the severity backstop. A read *outside*
+the roots that carries new data asks instead of denying. Denials are labelled
 `[auto-classifier] [<Rule>] ...`.
 
 ### Decision flow
 
-Each classified action is one Jev request carrying eleven typed questions,
+Each classified action is one Jev request carrying twelve typed questions,
 answered in parallel. Jev has three question types: `choice` picks one key from
 a set of criteria and reports a confidence; `noul` answers yes/no as a 0–1
 probability; `score` places the answer on an ordered scale.
@@ -279,11 +291,12 @@ probability; `score` places the answer on an ordered scale.
 | `hard_deny_rule` | choice | a matched `hard_deny` rule denies |
 | `user_forbids` | noul | ≥ 0.5 denies as `User Boundary` |
 | `soft_deny_rule` | choice | a matched `soft_deny` rule denies unless cleared |
-| `allow_rule` | choice | a matched `allow` exception clears a soft rule, and outranks scope and trust |
+| `allow_rule` | choice | a matched `allow` exception clears a soft rule, and outranks scope and trust, unless the action reveals credentials |
 | `user_authorizes` | noul | ≥ 0.5 clears a soft rule |
 | `destructive` | noul | ≥ 0.5 makes the action sensitive; ≥ `denyDestructive` denies (off by default) |
-| `secret_exposure` | noul | ≥ 0.5 makes the action sensitive; ≥ `denySecret` denies (off by default) |
-| `scope_escalation` | noul | ≥ 0.5 on a sensitive action denies, unless the action stays inside the roots, is not destructive or credential-bearing (`secret_exposure < 0.8`), and does not push |
+| `reveals_credentials` | noul | ≥ 0.5 makes the action sensitive wherever it stays, and stops an `allow` entry from clearing a soft rule; ≥ `denySecret` denies (off by default) |
+| `new_sensitive_data` | noul | ≥ 0.5 makes the action sensitive only when it leaves the environment (outbound, outside the roots, or a push) |
+| `scope_escalation` | noul | ≥ 0.5 on a sensitive action denies, unless the action stays inside the roots, is not destructive or credential-bearing, and does not push |
 | `trust_external` | noul | ≥ 0.5 on a sensitive action denies, unless the resolved paths are inside the roots (`ask` for a read outside) |
 | `risk` | score | ≥ `denyRisk` denies a shell command (off by default) |
 | `category` | choice | logged only |
@@ -293,11 +306,11 @@ flowchart TD
     req["Permission request"] --> cov{"Action kind"}
     cov -- "read, glob, grep, edit inside the project" --> autoAllow["Allow"]
     cov -- "subagent, MCP, skill, question" --> pass["Pass through unchanged"]
-    cov -- "shell, webfetch, websearch, external_directory, edit outside the project" --> state["Build state: PROJECT INSTRUCTIONS, EARLIER USER REQUESTS, USER REQUEST, ENVIRONMENT, ACTION"]
+    cov -- "shell, webfetch, websearch, external_directory, edit outside the project" --> state["Build state once per tool call (whole command): PROJECT INSTRUCTIONS, EARLIER USER REQUESTS, USER REQUEST, ENVIRONMENT, ACTION"]
     state --> trust["Resolve trust from the paths: working directory, scratch directory, repo worktrees"]
     trust --> cached{"Verdict cached?"}
     cached -- yes --> hard
-    cached -- no --> jev["Jev: 11 typed questions in one request"]
+    cached -- no --> jev["Jev: 12 typed questions in one request"]
     jev -- "HTTP error, timeout, or missing score" --> fbError["LLM fallback"]
     fbError -- "fails or disabled, failMode closed" --> deny
     fbError -- "fails or disabled, failMode open" --> opencode["OpenCode's own decision"]
@@ -306,11 +319,11 @@ flowchart TD
     conf -- no --> hard
     conf -- "yes, accept" --> hard
     conf -- "yes, deny: Uncertain" --> deny
-    conf -- "yes, fallback" --> fbLow["LLM fallback"]
-    fbLow --> still{"Still inconclusive?"}
-    still -- "no, or yes with failMode open" --> hard
-    still -- "yes, failMode closed" --> deny
-    conf -- "yes, tiered (the default)" --> tiered{"Facts decide: paths inside the roots, not network, not a state-rewriting git command, secret exposure < 0.8, destructive < 0.5, not privileged?"}
+    conf -- "yes, fallback" --> fbLow["LLM fallback (confidence 0.5)"]
+    fbLow -- "verdict: Jev's own allow wins over a fallback deny (ask)" --> hard
+    fbLow -- "fails or disabled, failMode closed" --> deny
+    fbLow -- "fails or disabled, failMode open" --> opencode
+    conf -- "yes, tiered (the default)" --> tiered{"Facts decide: paths inside the roots, not network, not a state-rewriting git command, reveals_credentials < 0.5, destructive < 0.5, not privileged? An allow rule settles it first; an outside read asks"}
     tiered -- yes --> allow
     tiered -- "no, failMode open" --> ask
     tiered -- "no, failMode closed" --> deny
@@ -324,14 +337,14 @@ flowchart TD
     cleared -- yes --> allowed
     soft -- no --> allowed{"allow_rule (choice) matched?"}
     allowed -- "yes: allow exception" --> allow
-    allowed -- no --> sensitive{"Sensitive? destructive (noul) or secret_exposure (noul) >= 0.5"}
+    allowed -- no --> sensitive{"Sensitive? destructive >= 0.5, reveals_credentials >= 0.5, or new_sensitive_data >= 0.5 and leaving (outbound, outside the roots, or a push)"}
     sensitive -- yes --> scope{"scope_escalation (noul) >= 0.5, and not a local, non-destructive, non-credential action?"}
     scope -- "yes: Scope Escalation" --> deny
     scope -- no --> external{"trust_external (noul) >= 0.5, after the trust resolver?"}
     external -- "yes, read outside: ask" --> ask
     external -- "yes, write or send: External" --> deny
     external -- no --> backstop
-    sensitive -- no --> backstop{"Backstop, off unless configured: destructive >= denyDestructive, secret_exposure >= denySecret, or risk (score) >= denyRisk?"}
+    sensitive -- no --> backstop{"Backstop, off unless configured: destructive >= denyDestructive, reveals_credentials >= denySecret, or risk (score) >= denyRisk?"}
     backstop -- yes --> deny
     backstop -- no --> allow
 
@@ -349,13 +362,16 @@ so the backstop is off unless configured: deletion is decided by the rules and
 the user's stated intent.
 
 `onUncertain: "tiered"` decides an inconclusive verdict from the facts, not from
-the model: a destructive, credential-bearing (`secret_exposure >= 0.8`),
+the model: a destructive, credential-bearing (`reveals_credentials >= 0.5`),
 privileged, or outbound action is not settled by location, nor is a
 state-rewriting git command or a `process` action (an install can run code).
-Anything else that stays inside the roots is allowed. This is why a fallback
+Otherwise a matched allow rule settles it, an action inside the roots is
+allowed, and a read outside the roots asks. An LLM fallback's verdict carries
+confidence 0.5, so it is inconclusive too and takes this path unless
+`onUncertain` is `accept` (where its answers stand). This is why a fallback
 model that does not exist no longer turns a local `pytest` run into a denial.
-Set `onUncertain` to `fallback`, `accept`, or `deny` to restore the older
-policies.
+Set `onUncertain` to `fallback`, `accept`, or `deny` to choose another policy;
+`fallback` never calls the fallback twice.
 
 Trust is resolved before the model's answer is read: the plugin canonicalises the
 working directory, the scratch directory, and `git worktree list --porcelain`
@@ -474,3 +490,10 @@ rather than as a score of 0. The action is sent JSON-encoded and marked as
 untrusted data, so text inside a command cannot pose as classifier
 instructions. The resulting decision is
 tagged `via=fallback` so it is visible in debug logs and permission messages.
+
+In auto-mode the fallback gets the auto prompt instead (rule labels, trust,
+intent, and both exposure questions) and its answer is marked confidence 0.5
+with no per-choice confidence. A fallback `user_forbids` without a verbatim
+`boundary_quote` from the context is discarded, and a fallback denial of
+something Jev allowed becomes a prompt rather than a block. If the fallback
+model itself is unavailable, the permission message names it.

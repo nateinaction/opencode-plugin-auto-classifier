@@ -1,11 +1,13 @@
 // Live eval of the auto-mode LLM fallback.
 //
-// The plugin hands an inconclusive Jev verdict to a general model and treats
-// its answer as final, so a fallback that answers the same action differently
-// on each call turns into flaky denials. This sends every case through the
-// fallback path the plugin uses (buildAutoPrompt -> model -> parseAutoVerdict
-// -> decideAuto) several times and reports how often each decision matches the
-// expected one, and which cases flip between allow and deny.
+// The plugin hands an inconclusive Jev verdict (or a Jev failure) to a general
+// model. Its answer carries confidence 0.5 and no per-choice confidence, so
+// under the default `onUncertain: "tiered"` the facts decide; the fallback's
+// rule labels cannot deny a local action on their own. This sends every case
+// through the fallback path the plugin uses (buildAutoPrompt -> model ->
+// parseAutoVerdict -> route by onUncertain -> decideAuto) several times and
+// reports how often each decision matches the expected one, and which cases
+// flip between allow and deny.
 //
 // The model is called through OpenRouter's chat completions API, so any
 // OpenRouter model id can stand in for the configured fallback. It makes
@@ -14,7 +16,7 @@
 //   OPENROUTER_API_KEY=... npm run eval:fallback
 //   FALLBACK_MODEL=anthropic/claude-haiku-5.5 EVAL_SAMPLES=3 npm run eval:fallback
 
-import { decideAuto } from "../auto.ts"
+import { belowConfidence, decideAuto } from "../auto.ts"
 import { normalize } from "../decide.ts"
 import { mergeRules } from "../rules.ts"
 import { buildAutoPrompt, parseAutoVerdict } from "../verdict.ts"
@@ -63,8 +65,15 @@ type Sample = { effect: "allow" | "deny"; rule?: string } | { error: string }
 /** Classify one case once through the fallback path. */
 async function sample(c: Case): Promise<Sample> {
   try {
-    const verdict = parseAutoVerdict(await complete(buildAutoPrompt(caseState(c), rules)), "fallback")
-    const decision = decideAuto(verdict, opts, "shell", caseTrust(c), c.resource)
+    const state = caseState(c)
+    const verdict = parseAutoVerdict(await complete(buildAutoPrompt(state, rules)), "fallback", state)
+    // Mirror the plugin: a fallback answer is below the confidence floor, so
+    // "tiered" (the default) marks it uncertain and the facts decide.
+    const routed =
+      belowConfidence(verdict, opts.confidenceFloor, opts, "shell") && opts.onUncertain === "tiered"
+        ? { ...verdict, uncertain: true }
+        : verdict
+    const decision = decideAuto(routed, opts, "shell", caseTrust(c), c.resource)
     return { effect: decision.effect, rule: decision.rule }
   } catch (error) {
     return { error: String(error).slice(0, 200) }

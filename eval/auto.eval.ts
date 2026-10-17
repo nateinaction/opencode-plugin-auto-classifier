@@ -62,7 +62,7 @@ for (const c of selected) {
     const got = inconclusive ? `${decision.effect} (inconclusive -> ${opts.onUncertain})` : decision.effect
     console.log(`${pass ? "PASS" : "FAIL"}  ${c.name}`)
     console.log(
-      `      expect=${c.expect} got=${got} rule=${decision.rule ?? "-"} secret=${pct(verdict.secretExposure)} scope=${pct(verdict.scopeEscalation)} external=${pct(verdict.trustExternal)} forbids=${pct(verdict.userForbids)} destructive=${pct(verdict.destructive)} hard=${verdict.hardDenyRule ?? "-"} soft=${verdict.softDenyRule ?? "-"} allow=${verdict.allowRule ?? "-"} authorizes=${pct(verdict.userAuthorizes)} confidence=${pct(verdict.confidence)}`,
+      `      expect=${c.expect} got=${got} rule=${decision.rule ?? "-"} credentials=${pct(verdict.revealsCredentials)} new-data=${pct(verdict.newSensitiveData)} scope=${pct(verdict.scopeEscalation)} external=${pct(verdict.trustExternal)} forbids=${pct(verdict.userForbids)} destructive=${pct(verdict.destructive)} hard=${verdict.hardDenyRule ?? "-"} soft=${verdict.softDenyRule ?? "-"} allow=${verdict.allowRule ?? "-"} authorizes=${pct(verdict.userAuthorizes)} confidence=${pct(verdict.confidence)}`,
     )
   } catch (error) {
     failures++

@@ -59,6 +59,7 @@ import {
   coverageFor,
   decideAuto,
   reachedPause,
+  reconcileFallback,
   type AutoDecision,
   type AutoVerdict,
 } from "./auto.ts"
@@ -147,7 +148,9 @@ export default {
     }
 
     const cache = new Map<string, { at: number; value: any }>()
-    const autoCache = new Map<string, { at: number; value: AutoVerdict }>()
+    // A verdict plus the Jev verdict it replaced, when a fallback supplied it.
+    type AutoClassification = { verdict: AutoVerdict; prior?: AutoVerdict }
+    const autoCache = new Map<string, { at: number; value: AutoClassification }>()
 
     // --- fallbacks (shared) --------------------------------------------------
 
@@ -371,16 +374,17 @@ export default {
 
     async function autoFallback(state: string): Promise<AutoVerdict> {
       const text = await generate(opts.fallbackModel, buildAutoPrompt(state, rules))
-      return parseAutoVerdict(text, "fallback")
+      return parseAutoVerdict(text, "fallback", state)
     }
 
-    async function classifyAuto(state: string, action: string, signal?: AbortSignal): Promise<AutoVerdict> {
+    async function classifyAuto(state: string, action: string, signal?: AbortSignal): Promise<AutoClassification> {
       const key = `${rulesKey}\n${state}`
       const hit = autoCache.get(key)
       const now = Date.now()
       if (hit && now - hit.at < opts.cacheTtlMs) return hit.value
 
       let verdict: AutoVerdict
+      let prior: AutoVerdict | undefined
       try {
         const { answers } = await classifier.answer(state, autoQuestions, signal)
         verdict = parseAutoAnswers(answers)
@@ -388,42 +392,62 @@ export default {
       } catch (error) {
         if (!canFallback()) throw error
         log("jev failed; using fallback", opts.fallbackModel, String(error).slice(0, 140))
-        verdict = await autoFallback(state)
+        try {
+          verdict = await autoFallback(state)
+        } catch (fallbackError) {
+          // Name both causes: the permission prompt is the only place a human
+          // sees why the classifier was unavailable.
+          log("fallback failed", String(fallbackError))
+          throw new Error(`Jev failed (${brief(error)}) and fallback ${opts.fallbackModel} failed (${brief(fallbackError)})`)
+        }
       }
 
       // Confidence-gated routing: `onUncertain` decides what an inconclusive
       // verdict becomes. "accept" leaves Jev's own answers to decide; "tiered"
       // lets the deterministic facts decide, so a missing fallback model cannot
-      // deny a local test run.
+      // deny a local test run. A fallback verdict is already the last resort:
+      // it is at 0.5 confidence, so the policy questions it rather than sending
+      // it to the fallback again, and Jev's own verdict is kept to reconcile it.
+      const fromFallback = verdict.source === "fallback"
       if (belowConfidence(verdict, opts.confidenceFloor, opts, action)) {
-        // A fallback's verdict replaces this one; keep it for diagnosis.
         log("inconclusive", JSON.stringify({ action, onUncertain: opts.onUncertain, verdict }))
-        if (opts.onUncertain === "deny" || opts.onUncertain === "tiered") verdict = { ...verdict, uncertain: true }
-        else if (opts.onUncertain === "fallback") verdict = await fallbackForUncertain(verdict, state, action)
-      }
-
-      if (autoCache.size > 500) autoCache.clear()
-      autoCache.set(key, { at: now, value: verdict })
-      return verdict
-    }
-
-    /** The LLM fallback's verdict for an uncertain one; throws when failing closed. */
-    async function fallbackForUncertain(uncertain: AutoVerdict, state: string, action: string): Promise<AutoVerdict> {
-      let verdict = uncertain
-      if (canFallback()) {
-        try {
-          verdict = await autoFallback(state)
-        } catch (error) {
-          log("low-confidence fallback failed", String(error))
+        if (opts.onUncertain === "deny" || opts.onUncertain === "tiered") {
+          verdict = { ...verdict, uncertain: true }
+        } else if (opts.onUncertain === "fallback" && !fromFallback) {
+          prior = verdict
+          verdict = await fallbackForUncertain(verdict, state, action)
         }
       }
-      // Still inconclusive: with fail-closed, an unusable verdict is denied
-      // rather than allowed (mirrors Claude Code's "no verdict" behavior).
-      if (belowConfidence(verdict, opts.confidenceFloor, opts, action) && opts.failMode === "closed") {
-        log("inconclusive verdict", JSON.stringify({ action, verdict }))
-        throw new Error("auto-classifier: inconclusive verdict; failing closed")
+
+      const value = { verdict, prior }
+      if (autoCache.size > 500) autoCache.clear()
+      autoCache.set(key, { at: now, value })
+      return value
+    }
+
+    /** Short, single-line error text for a permission message. */
+    function brief(error: unknown): string {
+      return String(error).replace(/\s+/g, " ").slice(0, 140)
+    }
+
+    /**
+     * The LLM fallback's verdict for an uncertain one. An unavailable fallback
+     * under fail-closed keeps its denial, but the error names the model so the
+     * prompt can say why.
+     */
+    async function fallbackForUncertain(uncertain: AutoVerdict, state: string, action: string): Promise<AutoVerdict> {
+      if (!canFallback()) {
+        if (opts.failMode !== "closed") return uncertain
+        log("inconclusive verdict", JSON.stringify({ action, verdict: uncertain, fallback: "disabled" }))
+        throw new Error("inconclusive verdict and the LLM fallback is disabled; failing closed")
       }
-      return verdict
+      try {
+        return await autoFallback(state)
+      } catch (error) {
+        log("low-confidence fallback failed", String(error))
+        if (opts.failMode !== "closed") return uncertain
+        throw new Error(`inconclusive verdict and fallback ${opts.fallbackModel} failed (${brief(error)}); failing closed`)
+      }
     }
 
     async function classifyAutoAll(
@@ -432,8 +456,8 @@ export default {
     ): Promise<AutoDecision> {
       let worst: AutoDecision = { effect: "allow", reason: "" }
       for (const item of items) {
-        const verdict = await classifyAuto(item.state, item.action, signal)
-        const decision = decideAuto(verdict, opts, item.action, item.trust, item.label)
+        const { verdict, prior } = await classifyAuto(item.state, item.action, signal)
+        const decision = reconcileFallback(verdict, prior, opts, item.action, item.trust, item.label)
         log(
           "classified",
           JSON.stringify({ mode: "auto", resource: item.label, effect: decision.effect, rule: decision.rule, trust: item.trust, verdict }),
@@ -495,15 +519,32 @@ export default {
     // same call. Bounded because a call that never completes is never removed.
     const shellCommands = new Map<string, string>()
     const SHELL_COMMAND_LIMIT = 64
+    const COMMAND_DECISION_LIMIT = 64
+    // One decision per whole command, by the same tool-call ID. Judging each
+    // part separately gave `echo ---` and `head -3` the verdict of the file
+    // read they were piped from. The command is now classified once and every
+    // part inherits that decision: a dangerous part still denies the whole
+    // command, and the safe wrappers follow it instead of flapping.
+    const commandDecisions = new Map<string, AutoDecision>()
+    function rememberCommand(id: string, command: string) {
+      shellCommands.delete(id)
+      shellCommands.set(id, command)
+      if (shellCommands.size > SHELL_COMMAND_LIMIT) shellCommands.delete(shellCommands.keys().next().value!)
+    }
+    function rememberDecision(id: string, decision: AutoDecision) {
+      commandDecisions.delete(id)
+      commandDecisions.set(id, decision)
+      if (commandDecisions.size > COMMAND_DECISION_LIMIT) commandDecisions.delete(commandDecisions.keys().next().value!)
+    }
     await ctx.tool.hook("execute.before", (event: any) => {
       const command = event?.input?.command
       if (event?.tool !== "shell" || typeof event.id !== "string" || typeof command !== "string") return
-      shellCommands.delete(event.id)
-      shellCommands.set(event.id, command)
-      if (shellCommands.size > SHELL_COMMAND_LIMIT) shellCommands.delete(shellCommands.keys().next().value!)
+      rememberCommand(event.id, command)
     })
     await ctx.tool.hook("execute.after", (event: any) => {
-      if (typeof event?.id === "string") shellCommands.delete(event.id)
+      if (typeof event?.id !== "string") return
+      shellCommands.delete(event.id)
+      commandDecisions.delete(event.id)
     })
 
     // Repeated-block accounting: after too many denials, stop auto-approving so
@@ -579,40 +620,57 @@ export default {
         return
       }
 
-      const instructionText = opts.conversationContext === "none" ? undefined : await instructions()
-      const prompts = opts.conversationContext === "none" ? [] : await userPrompts(event.sessionID)
-      const promptText = prompts.at(-1)
-      const earlierPrompts = prompts.slice(0, -1).map((text) => text.slice(0, EARLIER_PROMPT_CHARS))
-      const transcriptText = opts.conversationContext === "session" ? await sessionTranscript(event.sessionID) : undefined
-      const command = action === "shell" && event.source?.type === "tool" ? shellCommands.get(event.source.id) : undefined
-      const items = resources.map((resource) => ({
-        label: resource,
-        action,
-        trust: resolveTrust(action, resource, trustedRoots, baseDir()),
-        state: buildState({
-          mode: opts.conversationContext,
-          instructions: instructionText,
-          userPrompt: promptText,
-          earlierPrompts,
-          transcript: transcriptText,
-          action,
-          resource,
-          command,
-          directory: baseDir(),
-          scratch: scratchDirs,
-        }),
-      }))
+      // The whole shell command, when `execute.before` recorded this call.
+      // OpenCode splits a compound command and asks permission for each part;
+      // one classification per call ID decides every part alike.
+      const commandKey =
+        action === "shell" && event.source?.type === "tool" && typeof event.source.id === "string" ? event.source.id : undefined
+      const command = commandKey ? shellCommands.get(commandKey) : undefined
+      const settled = commandKey ? commandDecisions.get(commandKey) : undefined
 
       let decision: AutoDecision
-      try {
-        decision = await classifyAutoAll(items, event.signal)
-      } catch (error) {
-        log("auto classification failed", String(error))
-        if (opts.failMode === "closed" && incoming !== "deny") {
-          event.effect = "deny"
-          event.message = `[auto-classifier] classifier unavailable; failing closed. (${String(error).slice(0, 120)})`
+      if (settled) {
+        log("decision reused", JSON.stringify({ action, commandKey, effect: settled.effect, rule: settled.rule }))
+        decision = settled
+      } else {
+        const instructionText = opts.conversationContext === "none" ? undefined : await instructions()
+        const prompts = opts.conversationContext === "none" ? [] : await userPrompts(event.sessionID)
+        const promptText = prompts.at(-1)
+        const earlierPrompts = prompts.slice(0, -1).map((text) => text.slice(0, EARLIER_PROMPT_CHARS))
+        const transcriptText = opts.conversationContext === "session" ? await sessionTranscript(event.sessionID) : undefined
+        // Classify the whole command once. Its parts are only the resources to
+        // judge when the whole command is unavailable.
+        const targets = command ? [command] : resources
+        const items = targets.map((resource) => ({
+          label: resource,
+          action,
+          trust: resolveTrust(action, resource, trustedRoots, baseDir()),
+          state: buildState({
+            mode: opts.conversationContext,
+            instructions: instructionText,
+            userPrompt: promptText,
+            earlierPrompts,
+            transcript: transcriptText,
+            action,
+            resource,
+            // The target is the whole command, so it already carries it.
+            command: resource === command ? undefined : command,
+            directory: baseDir(),
+            scratch: scratchDirs,
+          }),
+        }))
+
+        try {
+          decision = await classifyAutoAll(items, event.signal)
+        } catch (error) {
+          log("auto classification failed", String(error))
+          if (opts.failMode === "closed" && incoming !== "deny") {
+            event.effect = "deny"
+            event.message = `[auto-classifier] classifier unavailable; ${brief(error)}`
+          }
+          return
         }
-        return
+        if (commandKey) rememberDecision(commandKey, decision)
       }
 
       const out = autoAuthority(incoming, decision, { userAskRule: userAsk, pausePrompts: pause })
