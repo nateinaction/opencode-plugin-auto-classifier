@@ -27,6 +27,8 @@ export type StateInput = {
   action: string
   /** The resource under classification (command text, path, URL, ...). */
   resource: string
+  /** The session's working directory, the trusted repo the rules refer to. */
+  directory?: string
   /** Upper bound on the assembled state. Defaults to 8000 characters. */
   maxChars?: number
 }
@@ -42,16 +44,29 @@ function tail(text: string, n: number): string {
 }
 
 /**
+ * The environment the action runs in: its kind and the working directory.
+ * Without the directory the classifier cannot tell an in-project path from an
+ * arbitrary one, though the trust rules are phrased in terms of it.
+ */
+function environmentSection(action: string, directory: string | undefined): string {
+  const lines = [`ENVIRONMENT:`, `Action kind: ${action}`]
+  const dir = (directory ?? "").trim()
+  if (dir) lines.push(`Working directory (trusted repo): ${dir}`)
+  return lines.join("\n")
+}
+
+/**
  * Build the classifier state: context sections (instructions, optional
- * transcript, the request) followed by the untrusted action. The action is
- * never truncated; when the whole state exceeds `maxChars`, the context
- * sections share the remaining budget equally.
+ * transcript, the request), then the environment, then the untrusted action.
+ * The environment and action are never truncated; when the whole state exceeds
+ * `maxChars`, the context sections share the remaining budget equally.
  */
 export function buildState(input: StateInput): string {
   const mode = input.mode ?? "prompt"
   const maxChars = input.maxChars ?? DEFAULT_MAX_CHARS
 
   const actionSection = `${ACTION_HEADER}\n${formatAction(input.resource ?? "")}`
+  const fixed = `${environmentSection(input.action, input.directory)}\n\n${actionSection}`
 
   const contexts: string[] = []
   if (mode !== "none") {
@@ -65,11 +80,11 @@ export function buildState(input: StateInput): string {
     if (prompt) contexts.push(`USER REQUEST:\n${prompt}`)
   }
 
-  if (contexts.length === 0) return actionSection
+  if (contexts.length === 0) return fixed
 
   const separators = contexts.length * 2
-  const budget = Math.max(0, maxChars - actionSection.length - separators)
+  const budget = Math.max(0, maxChars - fixed.length - separators)
   const per = Math.floor(budget / contexts.length)
   const fitted = contexts.map((section) => tail(section, per))
-  return [...fitted, actionSection].join("\n\n")
+  return [...fitted, fixed].join("\n\n")
 }

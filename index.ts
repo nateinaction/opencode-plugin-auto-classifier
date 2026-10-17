@@ -480,6 +480,7 @@ export default {
           transcript: transcriptText,
           action,
           resource,
+          directory: baseDir(),
         }),
       }))
 
