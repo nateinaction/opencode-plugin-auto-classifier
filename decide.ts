@@ -180,6 +180,11 @@ export function normalize(options: Options): Required<Options> {
   merged.repeatBlocks = { ...DEFAULTS.repeatBlocks, ...(options.repeatBlocks ?? {}) }
   // auto-mode denies an action it cannot classify unless the user chose otherwise.
   if (merged.mode === "auto-mode" && options.failMode === undefined) merged.failMode = "closed"
+  // auto-mode leaves deletion to its rules and the user's stated intent. Jev
+  // rates nearly every rm 95-98% destructive, so a 0.97 backstop denies at
+  // random and overrides an explicit request; denySecret and denyRisk are
+  // already off.
+  if (merged.mode === "auto-mode" && options.denyDestructive === undefined) merged.denyDestructive = 1.01
   return merged
 }
 

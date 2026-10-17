@@ -68,8 +68,15 @@ test("scope escalation alone does not deny a harmless action", () => {
   assert.equal(decideAuto(verdict({ scopeEscalation: 0.9, risk: 0.2 }), opts()).effect, "allow")
 })
 
-test("the severity backstop denies even with no rule match", () => {
-  assert.equal(decideAuto(verdict({ destructive: 0.98 }), opts()).effect, "deny")
+test("the severity backstop is off by default in auto-mode", () => {
+  // Rules and stated intent decide deletion; an explicit request must not be overridden.
+  assert.equal(decideAuto(verdict({ destructive: 0.98 }), opts()).effect, "allow")
+  assert.equal(opts().denyDestructive, 1.01)
+  assert.equal(normalize({}).denyDestructive, 0.97)
+})
+
+test("the severity backstop denies even with no rule match when configured", () => {
+  assert.equal(decideAuto(verdict({ destructive: 0.98 }), opts({ denyDestructive: 0.97 })).effect, "deny")
   assert.equal(decideAuto(verdict({ secretExposure: 1 }), opts({ denySecret: 0.9 })).effect, "deny")
   assert.equal(decideAuto(verdict({ risk: 1 }), opts({ denyRisk: 0.99 }), "shell").effect, "deny")
   // risk is only meaningful for shell commands, like the classic path.

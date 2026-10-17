@@ -193,7 +193,7 @@ passed through the object form:
 | `askSecret`        | `0.8`            | secret exposure >= this -> escalate                           |
 | `escalateTo`       | `ask`            | what escalation resolves to: `ask` or `deny`                  |
 | `escalate`         | `{}`             | per-action threshold overrides, e.g. `{"edit":{"destructive":0.5}}` |
-| `denyDestructive`  | `0.97`           | destructive >= this -> `deny`                                 |
+| `denyDestructive`  | `0.97`           | destructive >= this -> `deny` (`1.01`, off, in auto-mode)     |
 | `denySecret`       | `1.01`           | secret exposure >= this -> `deny` (off by default)            |
 | `denyRisk`         | `1.01`           | risk >= this -> `deny` (off by default, `shell` only)         |
 | `privilegedAsk`    | `true`           | always escalate `priv`/`sudo`-style commands                  |
@@ -316,8 +316,9 @@ flowchart TD
 
 An allow is written back as `allow` unless you have an OpenCode `ask` rule for
 the action, which stays a prompt, or repeated blocks have paused auto-approval.
-`denySecret` and `denyRisk` default to `1.01`, so those backstops are off unless
-configured.
+In auto-mode `denyDestructive`, `denySecret`, and `denyRisk` default to `1.01`,
+so the backstop is off unless configured: deletion is decided by the rules and
+the user's stated intent.
 
 Review scope follows Claude Code: `shell`, `webfetch`, `websearch`,
 `external_directory`, and edits **outside** the working directory are

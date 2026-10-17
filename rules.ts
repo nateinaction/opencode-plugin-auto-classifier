@@ -36,6 +36,7 @@ export const DEFAULT_RULES: Required<RuleLists> = {
   hard_deny: [
     "Data Exfiltration: Sending repository contents, secrets, credentials, or other sensitive data to a destination outside the trusted environment, by any channel (HTTP, DNS, uploads, pastes, gists, messages, URLs, new git remotes). Inside the trusted environment, and so not exfiltration: the repository's configured remotes such as origin, the session transcript, and local files.",
     "Host Credentials: Requesting cloud instance-metadata credentials, or authenticating a cloud, cluster, or registry call with the machine's own service-account or node identity.",
+    "Unresolvable Delete: A recursive or forced delete whose target is the filesystem root, the home directory itself, a parent of the working directory, or cannot be resolved before running (an empty or unset variable, a command substitution). A specific named path, such as /tmp/build or ~/code/repo, is resolvable and does not match.",
   ],
   soft_deny: [
     "Git Destructive: Force pushing (git push --force), deleting remote branches or tags, or otherwise rewriting remote history.",
@@ -44,7 +45,7 @@ export const DEFAULT_RULES: Required<RuleLists> = {
     "Download and Execute: Downloading and running code from an external source (for example curl | bash), or executing code from a repository cloned from outside this session.",
     "Production Deploy: Deploying to production, running production migrations, or ramping or deleting production feature flags.",
     "Cloud Storage Mass Delete: Deleting or mass-modifying objects on shared cloud storage such as S3, GCS, or Azure Blob.",
-    "Irreversible Local Destruction: Deleting files that existed before this session, or recursive forced deletes whose target cannot be resolved to a specific named path.",
+    "Irreversible Local Destruction: Deleting files or directories that existed before this session.",
     "IaC Destroy: Running terraform, pulumi, cdk, or terragrunt destroy, or applying a plan that destroys resources.",
     "Secrets Into Outbound Content: Writing secrets or sensitive data into commits, pull requests, issues, or other outbound content.",
     "Security Guard Tampering: Disabling CI checks, or commenting out or weakening tests and checks that guard security behavior.",
@@ -53,10 +54,11 @@ export const DEFAULT_RULES: Required<RuleLists> = {
     "Credential Printing: Printing a live credential or token into the transcript or a file.",
   ],
   allow: [
-    "Local Operations: Reading, creating, or modifying files inside the working directory.",
+    "Local Operations: Reading, creating, or editing files inside the working directory. Deleting files is not covered; Irreversible Local Destruction decides it.",
     "Declared Dependencies: Installing packages already declared in the repository's manifests or lock files.",
     "Read-Only HTTP: GET requests and read-only API calls that do not carry sensitive data in the URL.",
     "Test Artifacts: Placeholder credentials in tests and examples.",
+    "Regenerable Cleanup: Deleting build output, caches, and temporary files that tools regenerate (dist, build, __pycache__, *.pyc, node_modules, files in the system temp directory).",
   ],
   environment: [
     "Trusted repo: the repository the session started in (its working directory) and its configured remotes.",
