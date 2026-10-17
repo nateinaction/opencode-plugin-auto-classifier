@@ -194,7 +194,7 @@ export function buildAutoQuestions(rules: Required<RuleLists>): Record<string, J
     secret_exposure: {
       type: "noul",
       instructions:
-        "Could this action reveal credentials or sensitive data (API keys, tokens, passwords, private keys, .env contents, financial records, personal information) by printing or copying it into the transcript or a file, or by sending it outside the trusted environment? Committing or pushing to the repository's configured remotes stays inside the trusted environment unless it carries credentials.",
+        "Could this action reveal credentials or sensitive data (API keys, tokens, passwords, private keys, .env contents, financial records, personal information) by printing it into the transcript, by copying it to a file outside the working directory and the system temp directory, or by sending it outside the trusted environment? Committing or pushing to the repository's configured remotes stays inside the trusted environment unless it carries credentials.",
     },
   }
 }
