@@ -6,9 +6,35 @@ import {
   belowConfidence,
   coverageFor,
   decideAuto,
+  isStdinFilter,
   reachedPause,
   type AutoVerdict,
 } from "../auto.ts"
+
+test("a bare stream filter is recognized", () => {
+  for (const part of ["tail -40", "head -n 5", "tail -n +5", "wc -l", "uniq -c", "cat", "  tail -f  "]) {
+    assert.equal(isStdinFilter(part), true, part)
+  }
+})
+
+test("a filter given a file, a write, or shell syntax is left to the classifier", () => {
+  const parts = [
+    "tail -40 ledger/main.beancount",
+    "head 5",
+    "cat .env",
+    "cat ~/.aws/credentials",
+    "tail -40 > out.txt",
+    "tail -40 2>&1",
+    "head -n $N",
+    "tail --pid=1",
+    "sort -oout",
+    "tee out.txt",
+    "grep -c total",
+    "tail -n5; rm -rf ~",
+    "",
+  ]
+  for (const part of parts) assert.equal(isStdinFilter(part), false, part)
+})
 
 const opts = (over: Options = {}) => normalize({ mode: "auto-mode", ...over })
 
