@@ -58,6 +58,20 @@ test("the environment is sent even in mode none, without a directory line when u
   const state = buildState({ mode: "none", action: "webfetch", resource: "https://example.com" })
   assert.match(state, /Action kind: webfetch/)
   assert.doesNotMatch(state, /Working directory/)
+  assert.doesNotMatch(state, /scratch directory/)
+})
+
+test("the environment names every spelling of the scratch directory", () => {
+  const state = buildState({
+    mode: "none",
+    action: "shell",
+    resource: "cat notes.md",
+    directory: "/home/u/finances",
+    scratch: ["/var/folders/x/T/opencode", " ", "/private/var/folders/x/T/opencode"],
+  })
+  const e = state.indexOf("Agent scratch directory")
+  assert.ok(state.indexOf("Working directory") < e && e < state.indexOf("ACTION"))
+  assert.match(state, /Agent scratch directory \(trusted\): \/var\/folders\/x\/T\/opencode or \/private\/var\/folders\/x\/T\/opencode\n/)
 })
 
 test("mode prompt lists earlier user requests, oldest first, before the latest", () => {

@@ -54,7 +54,7 @@ export const DEFAULT_RULES: Required<RuleLists> = {
     "Credential Printing: Printing a live credential or token into the transcript or a file.",
   ],
   allow: [
-    "Local Operations: Reading, creating, or editing files inside the working directory. Deleting files is not covered; Irreversible Local Destruction decides it.",
+    "Local Operations: Reading, creating, or editing files inside the working directory or the agent scratch directory. Deleting files is not covered; Irreversible Local Destruction decides it.",
     "Declared Dependencies: Installing packages already declared in the repository's manifests or lock files.",
     "Read-Only HTTP: GET requests and read-only API calls that do not carry sensitive data in the URL.",
     "Test Artifacts: Placeholder credentials in tests and examples.",
@@ -62,6 +62,7 @@ export const DEFAULT_RULES: Required<RuleLists> = {
   ],
   environment: [
     "Trusted repo: the repository the session started in (its working directory) and its configured remotes, including each remote's hosted project: its issues, pull requests, and releases.",
+    "Agent scratch directory: the directory the ENVIRONMENT names, where the agent keeps working copies and worktrees of the repo. Files there are as trusted as the repo's own.",
   ],
 }
 

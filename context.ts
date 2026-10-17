@@ -42,6 +42,12 @@ export type StateInput = {
   command?: string
   /** The session's working directory, the trusted repo the rules refer to. */
   directory?: string
+  /**
+   * The agent's scratch directory, each spelling of it (macOS reaches the
+   * temp dir through both /var and /private/var). The agent keeps working
+   * copies there, including worktrees of the repo, so it is trusted like it.
+   */
+  scratch?: string[]
   /** Upper bound on the assembled state. Defaults to 8000 characters. */
   maxChars?: number
 }
@@ -58,14 +64,17 @@ function tail(text: string, n: number): string {
 }
 
 /**
- * The environment the action runs in: its kind and the working directory.
- * Without the directory the classifier cannot tell an in-project path from an
- * arbitrary one, though the trust rules are phrased in terms of it.
+ * The environment the action runs in: its kind, the working directory, and the
+ * agent's scratch directory. Without the paths the classifier cannot tell an
+ * in-project path from an arbitrary one, though the trust rules are phrased in
+ * terms of them.
  */
-function environmentSection(action: string, directory: string | undefined): string {
+function environmentSection(action: string, directory: string | undefined, scratch: readonly string[]): string {
   const lines = [`ENVIRONMENT:`, `Action kind: ${action}`]
   const dir = (directory ?? "").trim()
   if (dir) lines.push(`Working directory (trusted repo): ${dir}`)
+  const scratchDirs = scratch.map((path) => path.trim()).filter(Boolean)
+  if (scratchDirs.length) lines.push(`Agent scratch directory (trusted): ${scratchDirs.join(" or ")}`)
   return lines.join("\n")
 }
 
@@ -89,7 +98,7 @@ export function buildState(input: StateInput): string {
   const maxChars = input.maxChars ?? DEFAULT_MAX_CHARS
 
   const actionSection = `${ACTION_HEADER}\n${formatAction(input.resource ?? "")}`
-  const fixed = `${environmentSection(input.action, input.directory)}\n\n${actionSection}${commandSection(input)}`
+  const fixed = `${environmentSection(input.action, input.directory, input.scratch ?? [])}\n\n${actionSection}${commandSection(input)}`
 
   const contexts: string[] = []
   if (mode !== "none") {

@@ -28,8 +28,8 @@
 //   "jev" (default) -> https://opencode.ai/zen/v1/systemone (key: OPENCODE_API_KEY)
 //   "openrouter"    -> https://openrouter.ai/api/alpha/decisions (key: OPENROUTER_API_KEY)
 
-import { appendFile, mkdir, readFile } from "node:fs/promises"
-import { homedir } from "node:os"
+import { appendFile, mkdir, readFile, realpath } from "node:fs/promises"
+import { homedir, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 
 import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "./jev.ts"
@@ -225,6 +225,15 @@ export default {
       const dir = loc?.directory ?? loc?.worktree ?? loc?.path
       return typeof dir === "string" && dir ? dir : process.cwd()
     }
+
+    // OpenCode's scratch directory under the system temp dir, by each name the
+    // agent may use: macOS reaches it through both /var and /private/var.
+    const scratch = join(tmpdir(), "opencode")
+    const scratchDirs = await realpath(scratch).then(
+      (real) => [...new Set([scratch, real])],
+      // Not created yet: the unresolved path is the only name to match.
+      () => [scratch],
+    )
 
     // The latest user message plus the ones before it, so a terse reply
     // ("continue") carries the request it answers. Only the user's own words:
@@ -511,6 +520,7 @@ export default {
           resource,
           command,
           directory: baseDir(),
+          scratch: scratchDirs,
         }),
       }))
 
