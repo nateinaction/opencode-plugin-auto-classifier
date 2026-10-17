@@ -172,7 +172,7 @@ export function buildAutoQuestions(rules: Required<RuleLists>): Record<string, J
     user_forbids: {
       type: "noul",
       instructions:
-        "Did the user state a boundary that this action crosses, such as 'do not push until I review' or 'don't touch production'?",
+        "Did the user state a boundary that this action crosses, such as 'do not push until I review' or 'don't touch production'? Only a statement in the USER REQUEST, EARLIER USER REQUESTS, or PROJECT INSTRUCTIONS counts, and only when it covers this action: a boundary on a different action (such as what may go into issues, for a local read) is not crossed, and sensitive data is not by itself a boundary. Answer no when no such statement exists.",
     },
     scope_escalation: {
       type: "noul",
