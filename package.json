@@ -45,6 +45,8 @@
   "scripts": {
     "test": "node --test",
     "test:watch": "node --test --watch",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
     "eval": "node eval/auto.eval.ts",
     "eval:fallback": "node eval/fallback.eval.ts"
   },
@@ -66,5 +68,9 @@
     "solid-js": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
   }
 }

@@ -60,7 +60,7 @@ async function complete(prompt: string): Promise<string> {
   return text
 }
 
-type Sample = { effect: "allow" | "deny"; rule?: string } | { error: string }
+type Sample = { effect: "allow" | "ask" | "deny"; rule?: string } | { error: string }
 
 /** Classify one case once through the fallback path. */
 async function sample(c: Case): Promise<Sample> {

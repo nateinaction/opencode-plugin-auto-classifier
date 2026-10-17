@@ -24,7 +24,9 @@ export default Plugin.define({
   id: "auto-classifier.tui",
   async setup(context: any) {
     const rpc = context.client.rpc(JevClassifierRpc)
-    const [entries, setEntries] = createSignal<Entry[]>([])
+    // The host module is untyped (see virtual-modules.d.ts), so the value is
+    // annotated here rather than through a generic type argument.
+    const [entries, setEntries] = createSignal([] as Entry[])
 
     // Prefer semantic theme tokens; fall back to explicit colours.
     const feedback = context.theme?.text?.feedback ?? {}
@@ -41,7 +43,7 @@ export default Plugin.define({
     await refresh()
 
     const stop = rpc.events.on("classified", (event: { data: Entry }) => {
-      setEntries((prev) => [event.data, ...prev].slice(0, LIMIT))
+      setEntries((prev: Entry[]) => [event.data, ...prev].slice(0, LIMIT))
     })
     onCleanup(() => stop())
 
