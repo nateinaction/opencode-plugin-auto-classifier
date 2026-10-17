@@ -115,7 +115,8 @@ Other actions are ignored.
 - `decide.ts` — pure decision logic for the classic mode (thresholds, escalation, `describe`), unit-tested.
 - `rules.ts` — auto-mode rule lists, `$defaults` merge, and rule→criteria, unit-tested.
 - `context.ts` — auto-mode state assembly (instructions + request + untrusted action), unit-tested.
-- `auto.ts` — auto-mode decisions: rule precedence, coverage, authority, unit-tested.
+- `auto.ts` — auto-mode decisions: rule precedence, coverage, authority, session memo, unit-tested.
+- `provenance.ts` — which files this session wrote, and whether a delete only removes them, unit-tested.
 - `trust.ts` — deterministic trust resolution for paths, unit-tested.
 - `format.ts` — pure sidebar formatting helpers, unit-tested.
 - `build.ts` — identifies the running build (installed commit or version) for the sidebar stamp, unit-tested.
@@ -254,9 +255,26 @@ rather than a score escalator. The differences:
 - **The fallback is a guess, not a verdict.** Its answers carry confidence 0.5
   and no per-choice confidence, so they are questionable rather than final: a
   fallback denial of something Jev itself allowed becomes a prompt, never a denial. A
-  fallback's `user_forbids` needs a verbatim `boundary_quote` from your requests
-  or the project instructions; without one it is discarded. If the fallback
-  model is unavailable, the permission message names it.
+  fallback's `user_forbids` and `user_authorizes` need a verbatim
+  `boundary_quote` / `authorization_quote` from your requests or the project
+  instructions; without one each is discarded. If the fallback model is
+  unavailable, the permission message names it.
+- **Intent needs evidence.** A boundary or authorization answer counts only when
+  the answer also names the statement that backs it. Jev chooses one of your own
+  sentences from the project instructions or the last three requests (it does
+  not generate text); the fallback must quote one verbatim. A guess with no
+  statement behind it is no signal, in either direction. A boundary backed by
+  your words denies however uncertain the rest of the verdict is.
+- **Provenance is recorded.** The plugin records the files its tools create or
+  modify once the call completes. A file this session wrote is regenerable, so
+  `Irreversible Local Destruction` (which covers files that existed before the
+  session) cannot fire on deleting it, and the model is told the list. An edit
+  that failed, or a directory a copy landed in, does not count.
+- **Session memory.** A decision is remembered for the session, keyed by the
+  session, the assembled state, and the provenance fact, so a repeated check
+  costs no request after the classification cache expires either. An allow also
+  resets the consecutive-block counter, so one false denial cannot pause
+  auto-approval.
 - **Trust is resolved, not guessed.** The plugin resolves each path against the
   working directory, the scratch directory, and `git worktree list` entries of
   the repository. Inside those roots an external claim cannot stand, and a
@@ -276,12 +294,13 @@ trusted environment, which deny only an action that is also destructive,
 reveals credentials, or carries new sensitive data out of the environment (a
 push counts as leaving), and never a local action that is neither destructive,
 credential-bearing, nor a push; then the severity backstop. A read *outside*
-the roots that carries new data asks instead of denying. Denials are labelled
-`[auto-classifier] [<Rule>] ...`.
+the roots that carries new data asks instead of denying. `Irreversible Local
+Destruction` cannot fire when every file the action deletes is one this session
+wrote. Denials are labelled `[auto-classifier] [<Rule>] ...`.
 
 ### Decision flow
 
-Each classified action is one Jev request carrying twelve typed questions,
+Each classified action is one Jev request carrying the typed questions below,
 answered in parallel. Jev has three question types: `choice` picks one key from
 a set of criteria and reports a confidence; `noul` answers yes/no as a 0–1
 probability; `score` places the answer on an ordered scale.
@@ -289,10 +308,12 @@ probability; `score` places the answer on an ordered scale.
 | Question | Type | Decides |
 | --- | --- | --- |
 | `hard_deny_rule` | choice | a matched `hard_deny` rule denies |
-| `user_forbids` | noul | ≥ 0.5 denies as `User Boundary` |
-| `soft_deny_rule` | choice | a matched `soft_deny` rule denies unless cleared |
+| `user_forbids` | noul | ≥ 0.5 denies as `User Boundary`, when `boundary_span` names a statement |
+| `boundary_span` | choice | the context statement that states the boundary, or `none` |
+| `soft_deny_rule` | choice | a matched `soft_deny` rule denies unless cleared (and not `Irreversible Local Destruction` when the session wrote every file the action deletes) |
 | `allow_rule` | choice | a matched `allow` exception clears a soft rule, and outranks scope and trust, unless the action reveals credentials |
-| `user_authorizes` | noul | ≥ 0.5 clears a soft rule |
+| `user_authorizes` | noul | ≥ 0.5 clears a soft rule, when `authorization_span` names a statement |
+| `authorization_span` | choice | the context statement that names and authorizes the action, or `none` |
 | `destructive` | noul | ≥ 0.5 makes the action sensitive; ≥ `denyDestructive` denies (off by default) |
 | `reveals_credentials` | noul | ≥ 0.5 makes the action sensitive wherever it stays, and stops an `allow` entry from clearing a soft rule; ≥ `denySecret` denies (off by default) |
 | `new_sensitive_data` | noul | ≥ 0.5 makes the action sensitive only when it leaves the environment (outbound, outside the roots, or a push) |
@@ -301,16 +322,20 @@ probability; `score` places the answer on an ordered scale.
 | `risk` | score | ≥ `denyRisk` denies a shell command (off by default) |
 | `category` | choice | logged only |
 
+The two `*_span` questions are offered only when the state has quotable
+statements. When the state has none (for example `conversationContext: "none"`),
+neither intent signal can fire.
+
 ```mermaid
 flowchart TD
     req["Permission request"] --> cov{"Action kind"}
     cov -- "read, glob, grep, edit inside the project" --> autoAllow["Allow"]
     cov -- "subagent, MCP, skill, question" --> pass["Pass through unchanged"]
-    cov -- "shell, webfetch, websearch, external_directory, edit outside the project" --> state["Build state once per tool call (whole command): PROJECT INSTRUCTIONS, EARLIER USER REQUESTS, USER REQUEST, ENVIRONMENT, ACTION"]
-    state --> trust["Resolve trust from the paths: working directory, scratch directory, repo worktrees"]
+    cov -- "shell, webfetch, websearch, external_directory, edit outside the project" --> state["Build state once per tool call (whole command): PROJECT INSTRUCTIONS, EARLIER USER REQUESTS, USER REQUEST, ENVIRONMENT (directory, scratch, files this session wrote), ACTION"]
+    state --> trust["Resolve trust from the paths: working directory, scratch directory, repo worktrees; resolve delete targets against the files this session wrote"]
     trust --> cached{"Verdict cached?"}
     cached -- yes --> hard
-    cached -- no --> jev["Jev: 12 typed questions in one request"]
+    cached -- no --> jev["Jev: typed questions in one request, including the statement for any boundary or authorization"]
     jev -- "HTTP error, timeout, or missing score" --> fbError["LLM fallback"]
     fbError -- "fails or disabled, failMode closed" --> deny
     fbError -- "fails or disabled, failMode open" --> opencode["OpenCode's own decision"]
@@ -329,10 +354,10 @@ flowchart TD
     tiered -- "no, failMode closed" --> deny
 
     hard{"hard_deny_rule (choice) matched?"} -- yes --> deny
-    hard -- no --> forbids{"user_forbids (noul) >= 0.5?"}
+    hard -- no --> forbids{"user_forbids (noul) >= 0.5, with a chosen boundary_span?"}
     forbids -- "yes: User Boundary" --> deny
-    forbids -- no --> soft{"soft_deny_rule (choice) matched?"}
-    soft -- yes --> cleared{"allow_rule (choice) matched, or user_authorizes (noul) >= 0.5?"}
+    forbids -- no --> soft{"soft_deny_rule (choice) matched, and not moot because every file the action deletes was written by this session?"}
+    soft -- yes --> cleared{"allow_rule (choice) matched, or user_authorizes (noul) >= 0.5 with a chosen authorization_span?"}
     cleared -- no --> deny
     cleared -- yes --> allowed
     soft -- no --> allowed{"allow_rule (choice) matched?"}
@@ -365,13 +390,13 @@ the user's stated intent.
 the model: a destructive, credential-bearing (`reveals_credentials >= 0.5`),
 privileged, or outbound action is not settled by location, nor is a
 state-rewriting git command or a `process` action (an install can run code).
-Otherwise a matched allow rule settles it, an action inside the roots is
-allowed, and a read outside the roots asks. An LLM fallback's verdict carries
-confidence 0.5, so it is inconclusive too and takes this path unless
-`onUncertain` is `accept` (where its answers stand). This is why a fallback
-model that does not exist no longer turns a local `pytest` run into a denial.
-Set `onUncertain` to `fallback`, `accept`, or `deny` to choose another policy;
-`fallback` never calls the fallback twice.
+A user boundary backed by a quoted statement denies first. Otherwise a matched
+allow rule settles it, an action inside the roots is allowed, and a read outside
+the roots asks. An LLM fallback's verdict carries confidence 0.5, so it is
+inconclusive too and takes this path unless `onUncertain` is `accept` (where its
+answers stand). This is why a fallback model that does not exist no longer turns
+a local `pytest` run into a denial. Set `onUncertain` to `fallback`, `accept`,
+or `deny` to choose another policy; `fallback` never calls the fallback twice.
 
 Trust is resolved before the model's answer is read: the plugin canonicalises the
 working directory, the scratch directory, and `git worktree list --porcelain`
@@ -461,8 +486,10 @@ jev_classify_command({ "command": "rm -rf ./build" })
 
 The pure logic is split out so it can be tested without the OpenCode runtime:
 `decide.ts` (classic thresholds and escalation rules), `rules.ts` (auto-mode rule
-lists and `$defaults` merge), `context.ts` (auto-mode state assembly), `auto.ts`
-(auto-mode precedence, coverage, and authority), `trust.ts` (deterministic path
+lists and `$defaults` merge), `context.ts` (auto-mode state assembly and the
+quotable statements), `auto.ts`
+(auto-mode precedence, coverage, authority, and the session memo), `provenance.ts`
+(session file provenance and delete-target parsing), `trust.ts` (deterministic path
 resolution against the working directory, scratch directory, and repo
 worktrees), `format.ts` (sidebar rendering), `jev.ts` (the System One client,
 tested with an injected `fetch`), and `verdict.ts` (the fallback prompts and

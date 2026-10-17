@@ -29,7 +29,7 @@
 //   "openrouter"    -> https://openrouter.ai/api/alpha/decisions (key: OPENROUTER_API_KEY)
 
 import { execFile } from "node:child_process"
-import { appendFile, mkdir, readFile, realpath } from "node:fs/promises"
+import { appendFile, mkdir, readFile, realpath, stat } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { promisify } from "node:util"
@@ -38,7 +38,8 @@ import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "./jev.ts
 import { JevClassifierRpc } from "./rpc.ts"
 import { buildLabel, commitFromLock } from "./build.ts"
 import { buildAutoPrompt, buildVerdictPrompt, parseAutoVerdict, parseVerdict } from "./verdict.ts"
-import { resolveTrust } from "./trust.ts"
+import { resolvePath, resolveTrust } from "./trust.ts"
+import { deletesOnlySessionWrites, shellWrites } from "./provenance.ts"
 import {
   decide,
   describe,
@@ -51,15 +52,17 @@ import {
   type Options,
 } from "./decide.ts"
 import { mergeRules } from "./rules.ts"
-import { buildState } from "./context.ts"
+import { buildState, contextSpans } from "./context.ts"
 import { compact, type Entry } from "./format.ts"
 import {
   autoAuthority,
   belowConfidence,
   coverageFor,
-  decideAuto,
   reachedPause,
   reconcileFallback,
+  rememberSessionDecision,
+  sessionDecisionKey,
+  type ActionFacts,
   type AutoDecision,
   type AutoVerdict,
 } from "./auto.ts"
@@ -151,6 +154,9 @@ export default {
     // A verdict plus the Jev verdict it replaced, when a fallback supplied it.
     type AutoClassification = { verdict: AutoVerdict; prior?: AutoVerdict }
     const autoCache = new Map<string, { at: number; value: AutoClassification }>()
+    // Decisions remembered for the session, keyed by the session and the state
+    // classified. Bounded by `SESSION_DECISION_LIMIT` (see auto.ts).
+    const sessionDecisions = new Map<string, AutoDecision>()
 
     // --- fallbacks (shared) --------------------------------------------------
 
@@ -216,8 +222,6 @@ export default {
     }
 
     // --- auto-mode classification --------------------------------------------
-
-    const autoQuestions = buildAutoQuestions(rules)
 
     // Per-session context, cached briefly. The user prompts are the intent
     // signal and do not change within a turn.
@@ -372,9 +376,9 @@ export default {
       }
     }
 
-    async function autoFallback(state: string): Promise<AutoVerdict> {
+    async function autoFallback(state: string, spans: readonly string[]): Promise<AutoVerdict> {
       const text = await generate(opts.fallbackModel, buildAutoPrompt(state, rules))
-      return parseAutoVerdict(text, "fallback", state)
+      return parseAutoVerdict(text, "fallback", spans)
     }
 
     async function classifyAuto(state: string, action: string, signal?: AbortSignal): Promise<AutoClassification> {
@@ -383,17 +387,20 @@ export default {
       const now = Date.now()
       if (hit && now - hit.at < opts.cacheTtlMs) return hit.value
 
+      // The statements a boundary or authorization answer may quote: the
+      // user's own words, from the same state the model reads.
+      const spans = contextSpans(state)
       let verdict: AutoVerdict
       let prior: AutoVerdict | undefined
       try {
-        const { answers } = await classifier.answer(state, autoQuestions, signal)
-        verdict = parseAutoAnswers(answers)
+        const { answers } = await classifier.answer(state, buildAutoQuestions(rules, spans), signal)
+        verdict = parseAutoAnswers(answers, spans)
         verdict.source = opts.provider
       } catch (error) {
         if (!canFallback()) throw error
         log("jev failed; using fallback", opts.fallbackModel, String(error).slice(0, 140))
         try {
-          verdict = await autoFallback(state)
+          verdict = await autoFallback(state, spans)
         } catch (fallbackError) {
           // Name both causes: the permission prompt is the only place a human
           // sees why the classifier was unavailable.
@@ -415,7 +422,7 @@ export default {
           verdict = { ...verdict, uncertain: true }
         } else if (opts.onUncertain === "fallback" && !fromFallback) {
           prior = verdict
-          verdict = await fallbackForUncertain(verdict, state, action)
+          verdict = await fallbackForUncertain(verdict, state, spans, action)
         }
       }
 
@@ -435,14 +442,19 @@ export default {
      * under fail-closed keeps its denial, but the error names the model so the
      * prompt can say why.
      */
-    async function fallbackForUncertain(uncertain: AutoVerdict, state: string, action: string): Promise<AutoVerdict> {
+    async function fallbackForUncertain(
+      uncertain: AutoVerdict,
+      state: string,
+      spans: readonly string[],
+      action: string,
+    ): Promise<AutoVerdict> {
       if (!canFallback()) {
         if (opts.failMode !== "closed") return uncertain
         log("inconclusive verdict", JSON.stringify({ action, verdict: uncertain, fallback: "disabled" }))
         throw new Error("inconclusive verdict and the LLM fallback is disabled; failing closed")
       }
       try {
-        return await autoFallback(state)
+        return await autoFallback(state, spans)
       } catch (error) {
         log("low-confidence fallback failed", String(error))
         if (opts.failMode !== "closed") return uncertain
@@ -451,7 +463,7 @@ export default {
     }
 
     async function classifyAutoAll(
-      items: Array<{ label: string; state: string; action: string; trust: ReturnType<typeof resolveTrust> }>,
+      items: Array<{ label: string; state: string; action: string; trust: ActionFacts }>,
       signal?: AbortSignal,
     ): Promise<AutoDecision> {
       let worst: AutoDecision = { effect: "allow", reason: "" }
@@ -536,15 +548,66 @@ export default {
       commandDecisions.set(id, decision)
       if (commandDecisions.size > COMMAND_DECISION_LIMIT) commandDecisions.delete(commandDecisions.keys().next().value!)
     }
+
+    // --- file provenance -----------------------------------------------------
+    // The paths each session created or modified, so `Irreversible Local
+    // Destruction` ("files that existed before this session") cannot fire on a
+    // file the session wrote itself. Recorded from a completed tool call only,
+    // so a failed or denied edit does not make a pre-existing file look
+    // regenerable. Bounded per session and across sessions.
+    const sessionWrites = new Map<string, Set<string>>()
+    const SESSION_WRITE_LIMIT = 32
+    const WRITE_PATH_LIMIT = 256
+    const WRITES_IN_STATE = 10
+    const WRITE_TOOLS = new Set(["edit", "write", "patch", "multiedit", "apply_patch"])
+
+    function writtenIn(sessionID: unknown): Set<string> {
+      const id = typeof sessionID === "string" ? sessionID : ""
+      const hit = sessionWrites.get(id)
+      if (hit) return hit
+      const fresh = new Set<string>()
+      sessionWrites.set(id, fresh)
+      if (sessionWrites.size > SESSION_WRITE_LIMIT) sessionWrites.delete(sessionWrites.keys().next().value!)
+      return fresh
+    }
+
+    /** The paths a completed tool call wrote, as its input names them. */
+    function writePaths(tool: unknown, input: any): string[] {
+      if (WRITE_TOOLS.has(String(tool))) {
+        const path = input?.filePath ?? input?.path ?? input?.file
+        return typeof path === "string" ? [path] : []
+      }
+      if (tool === "shell" && typeof input?.command === "string") return shellWrites(input.command)
+      return []
+    }
+
+    async function recordWrites(sessionID: unknown, tool: unknown, input: any): Promise<void> {
+      for (const path of writePaths(tool, input)) {
+        const absolute = resolvePath(path.trim(), baseDir())
+        // A directory (a `cp` destination, say) is not a file the session
+        // regenerated; only an existing regular file counts.
+        const kind = await stat(absolute).catch(() => undefined)
+        if (!kind?.isFile()) continue
+        const written = writtenIn(sessionID)
+        for (const spelling of await canonicalRoots([absolute])) {
+          written.delete(spelling)
+          written.add(spelling)
+        }
+        while (written.size > WRITE_PATH_LIMIT) written.delete(written.keys().next().value!)
+      }
+    }
+
     await ctx.tool.hook("execute.before", (event: any) => {
       const command = event?.input?.command
       if (event?.tool !== "shell" || typeof event.id !== "string" || typeof command !== "string") return
       rememberCommand(event.id, command)
     })
-    await ctx.tool.hook("execute.after", (event: any) => {
+    await ctx.tool.hook("execute.after", async (event: any) => {
       if (typeof event?.id !== "string") return
       shellCommands.delete(event.id)
       commandDecisions.delete(event.id)
+      if (event.status !== "completed") return
+      await recordWrites(event.sessionID, event.tool, event.input)
     })
 
     // Repeated-block accounting: after too many denials, stop auto-approving so
@@ -641,34 +704,58 @@ export default {
         // Classify the whole command once. Its parts are only the resources to
         // judge when the whole command is unavailable.
         const targets = command ? [command] : resources
-        const items = targets.map((resource) => ({
-          label: resource,
-          action,
-          trust: resolveTrust(action, resource, trustedRoots, baseDir()),
-          state: buildState({
-            mode: opts.conversationContext,
-            instructions: instructionText,
-            userPrompt: promptText,
-            earlierPrompts,
-            transcript: transcriptText,
-            action,
-            resource,
-            // The target is the whole command, so it already carries it.
-            command: resource === command ? undefined : command,
-            directory: baseDir(),
-            scratch: scratchDirs,
-          }),
-        }))
-
-        try {
-          decision = await classifyAutoAll(items, event.signal)
-        } catch (error) {
-          log("auto classification failed", String(error))
-          if (opts.failMode === "closed" && incoming !== "deny") {
-            event.effect = "deny"
-            event.message = `[auto-classifier] classifier unavailable; ${brief(error)}`
+        // The files this session wrote, so the model can apply `Irreversible
+        // Local Destruction` as written instead of guessing provenance.
+        const written = writtenIn(event.sessionID)
+        const recentWrites = [...written].slice(-WRITES_IN_STATE)
+        const items = targets.map((resource) => {
+          const trust = resolveTrust(action, resource, trustedRoots, baseDir())
+          const facts: ActionFacts = {
+            ...trust,
+            written: deletesOnlySessionWrites(action, resource, written, baseDir()),
           }
-          return
+          return {
+            label: resource,
+            action,
+            trust: facts,
+            state: buildState({
+              mode: opts.conversationContext,
+              instructions: instructionText,
+              userPrompt: promptText,
+              earlierPrompts,
+              transcript: transcriptText,
+              action,
+              resource,
+              // The target is the whole command, so it already carries it.
+              command: resource === command ? undefined : command,
+              directory: baseDir(),
+              scratch: scratchDirs,
+              writes: recentWrites,
+            }),
+          }
+        })
+
+        // A session remembers its decisions, so a repeated check (a hook, a
+        // retried command, the same part asked twice) costs no request for the
+        // rest of the session, not just the classification cache's TTL.
+        const memoKey =
+          items.length === 1 ? sessionDecisionKey(event.sessionID, items[0].state, items[0].trust.written === true) : undefined
+        const remembered = memoKey ? sessionDecisions.get(memoKey) : undefined
+        if (remembered) {
+          log("decision remembered", JSON.stringify({ action, effect: remembered.effect, rule: remembered.rule }))
+          decision = remembered
+        } else {
+          try {
+            decision = await classifyAutoAll(items, event.signal)
+          } catch (error) {
+            log("auto classification failed", String(error))
+            if (opts.failMode === "closed" && incoming !== "deny") {
+              event.effect = "deny"
+              event.message = `[auto-classifier] classifier unavailable; ${brief(error)}`
+            }
+            return
+          }
+          if (memoKey) rememberSessionDecision(sessionDecisions, memoKey, decision)
         }
         if (commandKey) rememberDecision(commandKey, decision)
       }

@@ -32,6 +32,7 @@
     "decide.ts",
     "rules.ts",
     "trust.ts",
+    "provenance.ts",
     "context.ts",
     "auto.ts",
     "format.ts",

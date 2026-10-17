@@ -328,3 +328,47 @@ test("parseAutoAnswers treats a missing rule choice confidence as inconclusive",
   assert.equal(verdict.confidence, 0)
 })
 
+const SPANS = ["Fix the failing test, but don't push anything until I've reviewed it.", "Reconcile the ledger."]
+
+test("buildAutoQuestions offers the context statements when the state has them", () => {
+  const questions = buildAutoQuestions(mergeRules(undefined), SPANS)
+  const criteria = {
+    "statement 1": SPANS[0],
+    "statement 2": SPANS[1],
+    none: "No statement in the context does.",
+  }
+  assert.equal(questions.boundary_span.type, "choice")
+  assert.deepEqual(questions.boundary_span.criteria, criteria)
+  assert.deepEqual(questions.authorization_span.criteria, criteria)
+  // Without statements there is nothing to quote, so the choice is not asked.
+  assert.equal(buildAutoQuestions(mergeRules(undefined)).boundary_span, undefined)
+})
+
+test("parseAutoAnswers needs a chosen statement for a boundary or authorization", () => {
+  const answers = {
+    ...AUTO_ANSWERS.answers,
+    user_forbids: { noul: 0.9 },
+    user_authorizes: { noul: 0.8 },
+    boundary_span: { choice: "statement 1", confidence: 0.9 },
+    authorization_span: { choice: "statement 2", confidence: 0.9 },
+  }
+  const verdict = parseAutoAnswers(answers, SPANS)
+  assert.equal(verdict.userForbids, 0.9)
+  assert.equal(verdict.boundaryQuote, SPANS[0])
+  assert.equal(verdict.userAuthorizes, 0.8)
+  assert.equal(verdict.authorizationQuote, SPANS[1])
+  // No statement chosen, or one not offered, is no signal at all: the
+  // `gh issue comment` denial cited `user_forbids` 0.51 with nothing behind it.
+  for (const choice of [undefined, "none", "statement 9", "Statement 1", 1]) {
+    const dropped = parseAutoAnswers({ ...answers, boundary_span: { choice }, authorization_span: { choice } }, SPANS)
+    assert.equal(dropped.userForbids, 0, String(choice))
+    assert.equal(dropped.userAuthorizes, 0, String(choice))
+    assert.equal(dropped.boundaryQuote, undefined)
+    assert.equal(dropped.authorizationQuote, undefined)
+  }
+  // No statements offered: nothing to quote.
+  const unquoted = parseAutoAnswers(answers)
+  assert.equal(unquoted.userForbids, 0)
+  assert.equal(unquoted.userAuthorizes, 0)
+})
+

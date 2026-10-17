@@ -11,6 +11,7 @@ import { normalize, PROVIDER_DEFAULTS } from "../decide.ts"
 import { belowConfidence, decideAuto } from "../auto.ts"
 import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "../jev.ts"
 import { mergeRules } from "../rules.ts"
+import { contextSpans } from "../context.ts"
 import { caseState, caseTrust, selectCases } from "./cases.ts"
 
 const opts = normalize({ mode: "auto-mode", provider: "openrouter" })
@@ -21,7 +22,7 @@ if (!process.env[apiKeyEnv]) {
 }
 
 const classifier = createClassifier({ model: opts.model, endpoint: opts.endpoint, apiKeyEnv, timeoutMs: 30_000 })
-const questions = buildAutoQuestions(mergeRules(opts.rules))
+const rules = mergeRules(opts.rules)
 const pct = (n: number): string => `${Math.round(n * 100)}%`
 
 // EVAL_FILTER=<substring> runs only the cases whose name contains it.
@@ -42,8 +43,11 @@ const acceptLetsThrough: string[] = []
 for (const c of selected) {
   const state = caseState(c)
   try {
-    const { answers } = await classifier.answer(state, questions)
-    const verdict = parseAutoAnswers(answers)
+    // The statements a boundary or authorization answer must quote, from the
+    // same state the model reads, exactly as the plugin does it.
+    const spans = contextSpans(state)
+    const { answers } = await classifier.answer(state, buildAutoQuestions(rules, spans))
+    const verdict = parseAutoAnswers(answers, spans)
     verdict.source = "openrouter"
     const facts = caseTrust(c)
     const inconclusive = belowConfidence(verdict, opts.confidenceFloor, opts, "shell")
@@ -62,7 +66,7 @@ for (const c of selected) {
     const got = inconclusive ? `${decision.effect} (inconclusive -> ${opts.onUncertain})` : decision.effect
     console.log(`${pass ? "PASS" : "FAIL"}  ${c.name}`)
     console.log(
-      `      expect=${c.expect} got=${got} rule=${decision.rule ?? "-"} credentials=${pct(verdict.revealsCredentials)} new-data=${pct(verdict.newSensitiveData)} scope=${pct(verdict.scopeEscalation)} external=${pct(verdict.trustExternal)} forbids=${pct(verdict.userForbids)} destructive=${pct(verdict.destructive)} hard=${verdict.hardDenyRule ?? "-"} soft=${verdict.softDenyRule ?? "-"} allow=${verdict.allowRule ?? "-"} authorizes=${pct(verdict.userAuthorizes)} confidence=${pct(verdict.confidence)}`,
+      `      expect=${c.expect} got=${got} rule=${decision.rule ?? "-"} credentials=${pct(verdict.revealsCredentials)} new-data=${pct(verdict.newSensitiveData)} scope=${pct(verdict.scopeEscalation)} external=${pct(verdict.trustExternal)} forbids=${pct(verdict.userForbids)} destructive=${pct(verdict.destructive)} hard=${verdict.hardDenyRule ?? "-"} soft=${verdict.softDenyRule ?? "-"} allow=${verdict.allowRule ?? "-"} authorizes=${pct(verdict.userAuthorizes)} confidence=${pct(verdict.confidence)} boundary="${verdict.boundaryQuote?.slice(0, 50) ?? "-"}" authorization="${verdict.authorizationQuote?.slice(0, 50) ?? "-"}"`,
     )
   } catch (error) {
     failures++

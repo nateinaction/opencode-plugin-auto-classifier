@@ -8,6 +8,9 @@ import {
   decideAuto,
   reachedPause,
   reconcileFallback,
+  rememberSessionDecision,
+  sessionDecisionKey,
+  SESSION_DECISION_LIMIT,
   type AutoVerdict,
 } from "../auto.ts"
 
@@ -407,4 +410,78 @@ test("reachedPause fires on either the consecutive or total threshold", () => {
   assert.equal(reachedPause(3, 3, o), true)
   assert.equal(reachedPause(0, 20, o), true)
   assert.equal(reachedPause(2, 19, o), false)
+})
+
+test("deleting a file the session wrote is not irreversible destruction", () => {
+  // `rm .map-body.md`, written by the agent ~16s earlier: the rule is about
+  // files that existed before the session, so it cannot apply.
+  const inside = { inside: true, known: true }
+  const writes = { ...inside, written: true }
+  const destruction = verdict({ softDenyRule: "Irreversible Local Destruction", destructive: 0.9 })
+  assert.equal(decideAuto(destruction, opts(), "shell", writes, "rm .map-body.md").effect, "allow")
+  // Without the provenance fact the same verdict denies.
+  assert.equal(decideAuto(destruction, opts(), "shell", inside, "rm .map-body.md").rule, "Irreversible Local Destruction")
+  // And a pre-existing file stays denied.
+  assert.equal(
+    decideAuto(destruction, opts(), "shell", { ...inside, written: false }, "rm ledger/main.beancount").rule,
+    "Irreversible Local Destruction",
+  )
+  // A user's renamed deletion rule keeps its own meaning.
+  assert.equal(decideAuto(verdict({ softDenyRule: "Team Cleanup" }), opts(), "shell", writes, "rm x").rule, "Team Cleanup")
+  // Provenance never clears a credential block.
+  assert.equal(
+    decideAuto(verdict({ softDenyRule: "Credential Printing", revealsCredentials: 0.9 }), opts(), "shell", writes, "rm .env").rule,
+    "Credential Printing",
+  )
+})
+
+test("a session-written delete is not stopped by an uncertain destructive answer", () => {
+  const writes = { inside: true, known: true, written: true }
+  const uncertain = verdict({ uncertain: true, category: "write", destructive: 0.9 })
+  assert.equal(decideAuto(uncertain, opts(), "shell", writes, "rm .map-body.md").effect, "allow")
+  // The same uncertain verdict on a pre-existing file stays blocked.
+  assert.equal(
+    decideAuto(uncertain, opts(), "shell", { inside: true, known: true }, "rm ledger/main.beancount").rule,
+    "Uncertain",
+  )
+})
+
+test("a boundary the user's words state denies even when the verdict is uncertain", () => {
+  const inside = { inside: true, known: true }
+  // A local `pdftotext` read is otherwise settled by location; the quoted
+  // boundary is not the model's guess about intent.
+  const quoted = verdict({
+    uncertain: true,
+    category: "read",
+    userForbids: 0.9,
+    boundaryQuote: "don't open the statement PDFs",
+  })
+  assert.equal(decideAuto(quoted, opts(), "shell", inside, "pdftotext statement.pdf -").rule, "User Boundary")
+  // Without a quote the answer is a guess, and tiered lets the facts decide.
+  assert.equal(
+    decideAuto(verdict({ uncertain: true, category: "read", userForbids: 0.9 }), opts(), "shell", inside).effect,
+    "allow",
+  )
+})
+
+test("a session decision key separates sessions, states, and provenance", () => {
+  assert.notEqual(sessionDecisionKey("s1", "state"), sessionDecisionKey("s2", "state"))
+  assert.notEqual(sessionDecisionKey("s1", "state"), sessionDecisionKey("s1", "other"))
+  // The same command is a different question once the session has written the file.
+  assert.notEqual(sessionDecisionKey("s1", "state"), sessionDecisionKey("s1", "state", true))
+  assert.equal(sessionDecisionKey("s1", "state", true), sessionDecisionKey("s1", "state", true))
+})
+
+test("the session memo is bounded and evicts the oldest decision first", () => {
+  const decision = { effect: "allow" as const, reason: "ok" }
+  const memo = new Map<string, typeof decision>()
+  for (let i = 0; i < SESSION_DECISION_LIMIT; i++) rememberSessionDecision(memo, `k${i}`, decision)
+  assert.equal(memo.size, SESSION_DECISION_LIMIT)
+  // Re-remembering moves a key to the most recent end.
+  rememberSessionDecision(memo, "k1", decision)
+  rememberSessionDecision(memo, "new", decision)
+  assert.equal(memo.size, SESSION_DECISION_LIMIT)
+  assert.equal(memo.has("k0"), false)
+  assert.equal(memo.has("k1"), true)
+  assert.equal(memo.get("new"), decision)
 })

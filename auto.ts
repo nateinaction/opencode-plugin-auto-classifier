@@ -43,12 +43,23 @@ export type AutoVerdict = {
   choiceConfidence?: Record<string, number>
   /** Too uncertain to act on, and `onUncertain` is "deny". */
   uncertain?: boolean
-  /** The verbatim user words a fallback cited for `userForbids`, when it did. */
+  /** The verbatim user words the answer offered for `userForbids`, when it did. */
   boundaryQuote?: string
+  /** The verbatim user words the answer offered for `userAuthorizes`, when it did. */
+  authorizationQuote?: string
   source?: string
 }
 
 export type AutoDecision = { effect: "allow" | "ask" | "deny"; rule?: string; reason: string }
+
+/**
+ * The facts the plugin resolves itself for an action: where it runs, and
+ * whether it only deletes files this session wrote.
+ */
+export type ActionFacts = TrustFacts & {
+  /** True when every path the action deletes was created or modified by this session. */
+  written?: boolean
+}
 
 /** A yes/no answer at or above this probability counts as "yes". */
 export const INTENT_THRESHOLD = 0.5
@@ -65,6 +76,9 @@ const GIT_MUTATION =
 
 /** A push leaves the machine, so scope still applies however local the repo is. */
 const GIT_PUSH = /\bgit\s+(?:-C\s+\S+\s+)?push\b/
+
+/** The default soft rule whose meaning is "files that existed before this session". */
+export const LOCAL_DESTRUCTION_RULE = "Irreversible Local Destruction"
 
 /**
  * True when the action cannot change state. Category alone is not enough (a
@@ -88,11 +102,18 @@ export function decideAuto(
   verdict: AutoVerdict,
   opts: Required<Options>,
   action = "shell",
-  facts?: TrustFacts,
+  facts?: ActionFacts,
   resource = "",
 ): AutoDecision {
-  const { category, risk, destructive, revealsCredentials, newSensitiveData } = verdict
-  const bits = `risk=${pct(risk)} destructive=${pct(destructive)} credentials=${pct(revealsCredentials)} new-data=${pct(newSensitiveData)} via=${verdict.source ?? "jev"}`
+  const { category, risk, revealsCredentials, newSensitiveData } = verdict
+  // A file this session created or modified is regenerable, so deleting it is
+  // not irreversible destruction and `Irreversible Local Destruction` cannot
+  // apply (the rule is about files that existed before the session). The
+  // plugin proves this from the paths its tools wrote; the model is told the
+  // same list, but its destructive answer does not get to override the record.
+  const deletion = facts?.written === true
+  const destructive = deletion ? 0 : verdict.destructive
+  const bits = `risk=${pct(risk)} destructive=${pct(verdict.destructive)} credentials=${pct(revealsCredentials)} new-data=${pct(newSensitiveData)}${deletion ? " session-written" : ""} via=${verdict.source ?? "jev"}`
   const deny = (rule: string | undefined, reason: string): AutoDecision => ({ effect: "deny", rule, reason: `${reason} ${bits}` })
   const allow = (rule: string | undefined, reason: string): AutoDecision => ({ effect: "allow", rule, reason: `${reason} ${bits}` })
 
@@ -132,7 +153,9 @@ export function decideAuto(
   if (yes(verdict.userForbids)) return deny("User Boundary", "The user stated a boundary this action crosses.")
 
   const soft = ruleName(verdict.softDenyRule)
-  if (soft) {
+  // Deleting what the session wrote is not the rule's subject, so a match on
+  // the label carries no block; a user's renamed rule keeps its own meaning.
+  if (soft && !(deletion && soft === LOCAL_DESTRUCTION_RULE)) {
     // A generic allow entry cannot clear a block on a credential-shaped action;
     // the credential answer keeps `.env` from riding `Local Operations` through.
     const clears = Boolean(ruleName(verdict.allowRule)) && !credentials
@@ -188,13 +211,23 @@ function uncertain(
   verdict: AutoVerdict,
   opts: Required<Options>,
   action: string,
-  facts: TrustFacts | undefined,
+  facts: ActionFacts | undefined,
   bits: string,
   resource: string,
 ): AutoDecision {
   const stop = (reason: string): AutoDecision => ({ effect: "deny", rule: "Uncertain", reason: `${reason} ${bits}` })
+  // A boundary backed by the user's own words is evidence, not a model guess:
+  // it holds however uncertain the rest of the verdict is. Both parsers set
+  // the signal only when a statement backs it, so a bare `user_forbids`
+  // answer cannot deny here.
+  if (yes(verdict.userForbids) && verdict.boundaryQuote) {
+    return { effect: "deny", rule: "User Boundary", reason: `The user's words state a boundary this action crosses. ${bits}` }
+  }
   const credentials = yes(verdict.revealsCredentials)
-  if (verdict.destructive >= INTENT_THRESHOLD) return stop("The action may destroy data and the verdict was uncertain.")
+  // Every delete target was written by this session, so the destruction is
+  // regenerable and the model's destructive answer cannot settle the action.
+  const destructive = facts?.written === true ? 0 : verdict.destructive
+  if (destructive >= INTENT_THRESHOLD) return stop("The action may destroy data and the verdict was uncertain.")
   if (credentials) return stop("The action may reveal credentials and the verdict was uncertain.")
   if (verdict.category === "privileged") return stop("The action is privileged and the verdict was uncertain.")
   if (action === "shell" && GIT_MUTATION.test(resource)) return stop("The git command rewrites state and the verdict was uncertain.")
@@ -235,7 +268,7 @@ export function reconcileFallback(
   jev: AutoVerdict | undefined,
   opts: Required<Options>,
   action = "shell",
-  facts?: TrustFacts,
+  facts?: ActionFacts,
   resource = "",
 ): AutoDecision {
   const decision = decideAuto(verdict, opts, action, facts, resource)
@@ -355,4 +388,25 @@ export function belowConfidence(verdict: AutoVerdict, floor: number, opts: Requi
 export function reachedPause(consecutive: number, total: number, opts: Required<Options>): boolean {
   const { consecutive: maxConsecutive, total: maxTotal } = { ...REPEAT_DEFAULTS, ...(opts.repeatBlocks ?? {}) }
   return consecutive >= maxConsecutive || total >= maxTotal
+}
+
+/** Bound on remembered session decisions: the repeated checks, not a transcript. */
+export const SESSION_DECISION_LIMIT = 256
+
+/**
+ * The key a session remembers a decision under: the session, the exact state
+ * classified (action, resource, command, and context), and whether the action
+ * only deletes files this session wrote. The provenance flag is part of the
+ * key because a file can be written between two attempts at the same command,
+ * and the second attempt must see the newer fact.
+ */
+export function sessionDecisionKey(sessionID: string | undefined, state: string, written = false): string {
+  return `${sessionID ?? ""}\n${written ? "written" : "fresh"}\n${state}`
+}
+
+/** Remember a decision for the session, evicting the oldest once the memo is full. */
+export function rememberSessionDecision(memo: Map<string, AutoDecision>, key: string, decision: AutoDecision): void {
+  memo.delete(key)
+  memo.set(key, decision)
+  if (memo.size > SESSION_DECISION_LIMIT) memo.delete(memo.keys().next().value!)
 }

@@ -20,6 +20,7 @@ import { belowConfidence, decideAuto } from "../auto.ts"
 import { normalize } from "../decide.ts"
 import { mergeRules } from "../rules.ts"
 import { buildAutoPrompt, parseAutoVerdict } from "../verdict.ts"
+import { contextSpans } from "../context.ts"
 import { caseState, caseTrust, selectCases, type Case } from "./cases.ts"
 
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
@@ -66,7 +67,8 @@ type Sample = { effect: "allow" | "ask" | "deny"; rule?: string } | { error: str
 async function sample(c: Case): Promise<Sample> {
   try {
     const state = caseState(c)
-    const verdict = parseAutoVerdict(await complete(buildAutoPrompt(state, rules)), "fallback", state)
+    const spans = contextSpans(state)
+    const verdict = parseAutoVerdict(await complete(buildAutoPrompt(state, rules)), "fallback", spans)
     // Mirror the plugin: a fallback answer is below the confidence floor, so
     // "tiered" (the default) marks it uncertain and the facts decide.
     const routed =
