@@ -44,7 +44,8 @@
   "scripts": {
     "test": "node --test",
     "test:watch": "node --test --watch",
-    "eval": "node eval/auto.eval.ts"
+    "eval": "node eval/auto.eval.ts",
+    "eval:fallback": "node eval/fallback.eval.ts"
   },
   "dependencies": {
     "@opencode/plugin": "latest"
