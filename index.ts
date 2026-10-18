@@ -34,6 +34,12 @@ import { homedir, tmpdir } from "node:os"
 import { dirname, isAbsolute, join, resolve, sep } from "node:path"
 import { promisify } from "node:util"
 
+import type { Plugin } from "@opencode/plugin"
+// The promise host does not re-export its `ToolHooks` interface; the effect
+// host declares the same payloads, so it is the named type for both.
+import type { ToolHooks } from "@opencode/plugin/effect/tool"
+import type { PermissionEvaluation } from "@opencode/plugin/promise/permission"
+
 import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "./jev.ts"
 import { JevClassifierRpc } from "./rpc.ts"
 import { buildLabel, commitFromLock } from "./build.ts"
@@ -58,19 +64,22 @@ import {
   autoAuthority,
   belowConfidence,
   coverageFor,
+  permissionPolicy,
   reachedPause,
   reconcileFallback,
   rememberSessionDecision,
   sessionDecisionKey,
+  UNKNOWN_PERMISSION_POLICY,
   type ActionFacts,
   type AutoDecision,
   type AutoVerdict,
+  type UserPermissionPolicy,
 } from "./auto.ts"
 
 export default {
   id: "auto-classifier",
 
-  async setup(ctx: any) {
+  async setup(ctx: Plugin.Context) {
     const opts = normalize((ctx.options ?? {}) as Options)
     const auto = opts.mode === "auto-mode"
     const rules = mergeRules(opts.rules)
@@ -161,9 +170,10 @@ export default {
     // --- fallbacks (shared) --------------------------------------------------
 
     async function generate(modelRef: string, prompt: string): Promise<string> {
-      const model = parseModelRef(modelRef)
+      // `parseModelRef` returns the two plain ids; the API brands them.
+      const model = parseModelRef(modelRef) as Parameters<Plugin.Context["generate"]["text"]>[0]["model"]
       const result = await ctx.generate.text({ model, prompt })
-      return result?.text ?? result?.data?.text ?? ""
+      return result?.text ?? ""
     }
 
     const canFallback = () => opts.fallback && typeof ctx.generate?.text === "function"
@@ -231,8 +241,7 @@ export default {
     const INSTRUCTIONS_TTL = 5 * 60_000
 
     function baseDir(): string {
-      const loc = ctx.location
-      const dir = loc?.directory ?? loc?.worktree ?? loc?.path
+      const dir = ctx.location?.directory
       return typeof dir === "string" && dir ? dir : process.cwd()
     }
 
@@ -491,35 +500,26 @@ export default {
       return worst
     }
 
-    // Does OpenCode have a user-configured `ask` rule for this action? If so, an
-    // explicit ask is final and the classifier must not auto-approve or deny it.
-    function matchRule(pattern: unknown, resource: string): boolean {
-      if (pattern === "*") return true
-      if (typeof pattern !== "string") return false
-      if (pattern === resource) return true
-      if (pattern.endsWith("*")) return resource.startsWith(pattern.slice(0, -1))
-      return false
-    }
-
-    // A user's own `allow` rule is their stated intent, and auto-mode must not
-    // deny over it. The shipped base policy is `{"action":"*","resource":"*"}`
-    // and says nothing, so it is excluded; a saved "allow always" approval and
-    // a repo `permissions` entry both match by exact action and pattern.
-    async function userRules(action: string, resources: string[]): Promise<{ ask: boolean; allow: boolean }> {
-      const none = { ask: false, allow: false }
-      if (typeof ctx.permission?.list !== "function") return none
+    // The session's effective ruleset: `Session.Info.permissions`, the rules
+    // OpenCode evaluates after the agent's own. A user's `ask` rule is final and
+    // the classifier must not auto-approve or deny it; a non-wildcard `allow`
+    // rule is their stated intent, and auto-mode must not deny over it.
+    //
+    // `permission.list` is not this source: it takes a required `{ sessionID }`
+    // and returns pending permission *requests*, not rules. A failed lookup is
+    // reported as `known: false`, so the caller keeps OpenCode's prompt instead
+    // of reading the failure as "the user has no policy".
+    async function userRules(sessionID: string, action: string, resources: string[]): Promise<UserPermissionPolicy> {
+      if (!sessionID || typeof ctx.session?.get !== "function") {
+        log("session permission rules unavailable", JSON.stringify({ action, reason: "session.get is not available" }))
+        return UNKNOWN_PERMISSION_POLICY
+      }
       try {
-        const listed = await ctx.permission.list()
-        const rules: any[] = Array.isArray(listed) ? listed : Array.isArray(listed?.rules) ? listed.rules : []
-        const matches = (rule: any): boolean =>
-          rule?.action === action && resources.some((resource) => matchRule(rule?.resource, resource))
-        return {
-          ask: rules.some((rule) => rule?.effect === "ask" && matches(rule)),
-          allow: rules.some((rule) => rule?.effect === "allow" && rule?.resource !== "*" && matches(rule)),
-        }
+        const session = await ctx.session.get({ sessionID })
+        return permissionPolicy(session?.permissions, action, resources)
       } catch (error) {
-        log("permission.list failed", String(error))
-        return none
+        log("session permission rules unavailable", JSON.stringify({ action, error: brief(error) }))
+        return UNKNOWN_PERMISSION_POLICY
       }
     }
 
@@ -597,13 +597,13 @@ export default {
       }
     }
 
-    await ctx.tool.hook("execute.before", (event: any) => {
-      const command = event?.input?.command
-      if (event?.tool !== "shell" || typeof event.id !== "string" || typeof command !== "string") return
+    await ctx.tool.hook("execute.before", (event: ToolHooks["execute.before"]) => {
+      const input = event.input as { command?: unknown } | undefined
+      const command = input?.command
+      if (event.tool !== "shell" || typeof command !== "string") return
       rememberCommand(event.id, command)
     })
-    await ctx.tool.hook("execute.after", async (event: any) => {
-      if (typeof event?.id !== "string") return
+    await ctx.tool.hook("execute.after", async (event: ToolHooks["execute.after"]) => {
       shellCommands.delete(event.id)
       commandDecisions.delete(event.id)
       if (event.status !== "completed") return
@@ -620,10 +620,10 @@ export default {
     // Core wrapper: intercept permission evaluations and fold in the decision.
     // In classic mode this never lowers a decision; in auto-mode it may
     // auto-approve, because that is the point of the profile.
-    await ctx.permission.hook("evaluate", async (event: any) => {
-      const resources: string[] = Array.isArray(event.resources) ? event.resources : []
+    await ctx.permission.hook("evaluate", async (event: PermissionEvaluation) => {
+      const resources = [...event.resources]
       if (resources.length === 0) return
-      const action = event.action as string
+      const action = event.action
 
       if (!auto) {
         const items = resources
@@ -663,9 +663,11 @@ export default {
 
       const session = blockState(event.sessionID)
       const pause = reachedPause(session.consecutive, session.total, opts)
-      // A user ask rule only matters when OpenCode is already prompting.
-      const user = await userRules(action, resources)
-      const userAsk = incoming === "ask" ? user.ask : false
+      // A user ask rule only matters when OpenCode is already prompting. If the
+      // ruleset could not be read, an incoming prompt is kept: the lookup
+      // failure must not read as "the user has no ask rule".
+      const user = await userRules(event.sessionID, action, resources)
+      const userAsk = incoming === "ask" ? user.ask || !user.known : false
 
       // An explicit user allow rule is their policy; the classifier does not
       // second-guess it. Without this, a repo `permissions` allowlist changed
@@ -746,7 +748,7 @@ export default {
           decision = remembered
         } else {
           try {
-            decision = await classifyAutoAll(items, event.signal)
+            decision = await classifyAutoAll(items)
           } catch (error) {
             log("auto classification failed", String(error))
             if (opts.failMode === "closed" && incoming !== "deny") {

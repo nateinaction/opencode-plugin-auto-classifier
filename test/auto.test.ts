@@ -6,6 +6,8 @@ import {
   belowConfidence,
   coverageFor,
   decideAuto,
+  matchPermissionRule,
+  permissionPolicy,
   reachedPause,
   reconcileFallback,
   rememberSessionDecision,
@@ -484,4 +486,51 @@ test("the session memo is bounded and evicts the oldest decision first", () => {
   assert.equal(memo.has("k0"), false)
   assert.equal(memo.has("k1"), true)
   assert.equal(memo.get("new"), decision)
+})
+
+test("matchPermissionRule honors wildcards and exact patterns", () => {
+  assert.equal(matchPermissionRule("*", "anything"), true)
+  assert.equal(matchPermissionRule("pytest *", "pytest -q"), true)
+  assert.equal(matchPermissionRule("pytest *", "pytest"), false)
+  assert.equal(matchPermissionRule("git status", "git status --short"), false)
+  assert.equal(matchPermissionRule("git status*", "git status --short"), true)
+})
+
+test("a non-wildcard allow rule is the user's policy", () => {
+  const rules = [
+    { action: "*", resource: "*", effect: "allow" as const },
+    { action: "shell", resource: "pytest *", effect: "allow" as const },
+  ]
+  assert.deepEqual(permissionPolicy(rules, "shell", ["pytest -q"]), { ask: false, allow: true, known: true })
+})
+
+test("the shipped wildcard base policy is not an allow rule", () => {
+  const rules = [{ action: "*", resource: "*", effect: "allow" as const }]
+  assert.deepEqual(permissionPolicy(rules, "shell", ["pytest -q"]), { ask: false, allow: false, known: true })
+})
+
+test("an ask rule is reported even when an allow rule also matches", () => {
+  const rules = [
+    { action: "shell", resource: "git push*", effect: "allow" as const },
+    { action: "shell", resource: "git push*", effect: "ask" as const },
+  ]
+  assert.equal(permissionPolicy(rules, "shell", ["git push origin main"]).ask, true)
+  assert.equal(permissionPolicy(rules, "shell", ["git push origin main"]).allow, true)
+})
+
+test("permission rules are matched per action and resource", () => {
+  const rules = [{ action: "shell", resource: "pytest *", effect: "allow" as const }]
+  assert.equal(permissionPolicy(rules, "read", ["pytest -q"]).allow, false)
+  assert.equal(permissionPolicy(rules, "shell", ["npm test"]).allow, false)
+  assert.equal(permissionPolicy(undefined, "shell", ["pytest -q"]).known, true)
+})
+
+test("a wildcard action rule applies to every action", () => {
+  const rules = [{ action: "*", resource: "/etc/*", effect: "ask" as const }]
+  assert.equal(permissionPolicy(rules, "read", ["/etc/hosts"]).ask, true)
+  assert.equal(permissionPolicy(rules, "edit", ["/home/dev/notes.md"]).ask, false)
+})
+
+test("permissionPolicy tolerates a malformed ruleset", () => {
+  assert.deepEqual(permissionPolicy({} as never, "shell", ["pytest -q"]), { ask: false, allow: false, known: true })
 })

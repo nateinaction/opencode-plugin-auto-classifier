@@ -52,6 +52,55 @@ export type AutoVerdict = {
 
 export type AutoDecision = { effect: "allow" | "ask" | "deny"; rule?: string; reason: string }
 
+/** One rule from the session's effective ruleset (`Session.Info.permissions`). */
+export type PermissionRule = {
+  readonly action: string
+  readonly resource: string
+  readonly effect: "allow" | "deny" | "ask"
+}
+
+/**
+ * What the user's own ruleset says about an action. `known` is false when the
+ * ruleset could not be read: the caller must then keep OpenCode's prompt rather
+ * than read the failure as "the user has no policy".
+ */
+export type UserPermissionPolicy = { ask: boolean; allow: boolean; known: boolean }
+
+/** A ruleset that could not be read. */
+export const UNKNOWN_PERMISSION_POLICY: UserPermissionPolicy = { ask: false, allow: false, known: false }
+
+/** True when a permission `resource` pattern matches a resource. */
+export function matchPermissionRule(pattern: string, resource: string): boolean {
+  if (typeof pattern !== "string") return false
+  if (pattern === "*") return true
+  if (pattern === resource) return true
+  if (pattern.endsWith("*")) return resource.startsWith(pattern.slice(0, -1))
+  return false
+}
+
+/**
+ * The user's own policy for an action, read from the session's ruleset. The
+ * shipped base policy is `{"action":"*","resource":"*"}` and says nothing, so a
+ * `*` resource is not a policy; a repo `permissions` entry or session update
+ * matches by action and resource pattern. A wildcard action applies to every
+ * action.
+ */
+export function permissionPolicy(
+  rules: readonly PermissionRule[] | undefined,
+  action: string,
+  resources: readonly string[],
+): UserPermissionPolicy {
+  const listed = Array.isArray(rules) ? rules : []
+  const matches = (rule: PermissionRule): boolean =>
+    matchPermissionRule(rule?.action, action) &&
+    resources.some((resource) => matchPermissionRule(rule?.resource, resource))
+  return {
+    ask: listed.some((rule) => rule?.effect === "ask" && matches(rule)),
+    allow: listed.some((rule) => rule?.effect === "allow" && rule?.resource !== "*" && matches(rule)),
+    known: true,
+  }
+}
+
 /**
  * The facts the plugin resolves itself for an action: where it runs, and
  * whether it only deletes files this session wrote.

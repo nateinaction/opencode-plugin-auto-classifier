@@ -115,7 +115,7 @@ Other actions are ignored.
 - `decide.ts` — pure decision logic for the classic mode (thresholds, escalation, `describe`), unit-tested.
 - `rules.ts` — auto-mode rule lists, `$defaults` merge, and rule→criteria, unit-tested.
 - `context.ts` — auto-mode state assembly (instructions + request + untrusted action), unit-tested.
-- `auto.ts` — auto-mode decisions: rule precedence, coverage, authority, session memo, unit-tested.
+- `auto.ts` — auto-mode decisions: rule precedence, coverage, authority, the session's user-permission policy, session memo, unit-tested.
 - `provenance.ts` — which files this session wrote, and whether a delete only removes them, unit-tested.
 - `trust.ts` — deterministic trust resolution for paths, unit-tested.
 - `format.ts` — pure sidebar formatting helpers, unit-tested.
@@ -434,6 +434,17 @@ cannot classify is denied, matching Claude Code), and a user-configured OpenCode
 too many blocks (`repeatBlocks`, default 3 consecutive / 20 total) auto-approval
 pauses so prompts resume.
 
+The user's rules come from the session's effective ruleset
+(`Session.Info.permissions`, which OpenCode evaluates after the agent's rules):
+a non-wildcard `allow` rule auto-approves even when OpenCode would prompt, and an
+`ask` rule keeps its prompt. The shipped `{"action":"*","resource":"*"}` base
+policy says nothing, so it is not treated as an allow. If the ruleset cannot be
+read, the plugin keeps OpenCode's prompt rather than assuming the user has no
+policy, and logs `session permission rules unavailable`. A saved "allow always"
+approval lives in OpenCode's project-level saved approvals, not in that ruleset,
+and the plugin API does not expose it; auto-mode therefore does not see it as a
+user allow rule.
+
 The tool `auto_classifier_rules` prints the effective, merged rule lists (parity
 with `claude auto-mode defaults`). `denyDestructive`/`denySecret`/`denyRisk`
 become the severity backstop; the `ask*` thresholds, `escalate`, `escalateTo`,
@@ -493,7 +504,8 @@ quotable statements), `auto.ts`
 resolution against the working directory, scratch directory, and repo
 worktrees), `format.ts` (sidebar rendering), `jev.ts` (the System One client,
 tested with an injected `fetch`), and `verdict.ts` (the fallback prompts and
-parsers).
+parsers). `test/plugin.test.ts` runs the real `setup` against a fake `ctx`, so
+the permission hook's user-rule path is exercised without a key or a network.
 
 ```sh
 npm test          # node --test, no dependencies
