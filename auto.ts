@@ -23,6 +23,8 @@ export type AutoVerdict = {
   revealsCredentials: number
   /** 0..1 probability the action surfaces sensitive data the session did not already have. */
   newSensitiveData: number
+  /** 0..1 probability the action reads or prints file contents rather than only names or metadata. */
+  readsContents: number
   /** Matched hard-deny rule label, or undefined/"none". */
   hardDenyRule?: string
   /** Matched soft-deny rule label, or undefined/"none". */
@@ -154,7 +156,7 @@ export function decideAuto(
   facts?: ActionFacts,
   resource = "",
 ): AutoDecision {
-  const { category, risk, revealsCredentials, newSensitiveData } = verdict
+  const { category, risk, revealsCredentials, newSensitiveData, readsContents } = verdict
   // A file this session created or modified is regenerable, so deleting it is
   // not irreversible destruction and `Irreversible Local Destruction` cannot
   // apply (the rule is about files that existed before the session). The
@@ -162,7 +164,7 @@ export function decideAuto(
   // same list, but its destructive answer does not get to override the record.
   const deletion = facts?.written === true
   const destructive = deletion ? 0 : verdict.destructive
-  const bits = `risk=${pct(risk)} destructive=${pct(verdict.destructive)} credentials=${pct(revealsCredentials)} new-data=${pct(newSensitiveData)}${deletion ? " session-written" : ""} via=${verdict.source ?? "jev"}`
+  const bits = `risk=${pct(risk)} destructive=${pct(verdict.destructive)} credentials=${pct(revealsCredentials)} new-data=${pct(newSensitiveData)} contents=${pct(readsContents)}${deletion ? " session-written" : ""} via=${verdict.source ?? "jev"}`
   const deny = (rule: string | undefined, reason: string): AutoDecision => ({ effect: "deny", rule, reason: `${reason} ${bits}` })
   const allow = (rule: string | undefined, reason: string): AutoDecision => ({ effect: "allow", rule, reason: `${reason} ${bits}` })
 
@@ -180,11 +182,15 @@ export function decideAuto(
   // did not already have is an exposure only once the action carries it out of
   // the environment; Jev's old scalar called ordinary local `pytest` and
   // `tail` runs 50-70% risky, and every one of them became a false denial.
+  // A listing prints names, not contents, so `new_sensitive_data` is decisive
+  // only for an action that reads content: `ls`/`find` of an outside directory
+  // named only files, while `sqlite3` over an outside database prints rows.
   const credentials = yes(revealsCredentials)
+  const contentRead = yes(readsContents)
   // A push carries the data off the machine even to a trusted remote, so it
   // counts as leaving for the purpose of new data.
   const leaving = outbound || external || GIT_PUSH.test(resource)
-  const exposed = credentials || (yes(newSensitiveData) && leaving)
+  const exposed = credentials || (yes(newSensitiveData) && contentRead && leaving)
   // A local action that neither leaves the machine nor destroys data cannot
   // cross a task boundary in a way worth denying: an unrequested `pytest` or
   // `tail` is not a safety event. Scope stays meaningful for pushes, network
@@ -383,6 +389,7 @@ const RESTRICTIVE_SIGNALS = [
   "scopeEscalation",
   "revealsCredentials",
   "newSensitiveData",
+  "readsContents",
 ] as const
 
 const ambiguous = (prob: number): boolean => Math.abs(prob - INTENT_THRESHOLD) < AMBIGUOUS_BAND

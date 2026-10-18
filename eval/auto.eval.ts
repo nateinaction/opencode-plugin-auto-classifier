@@ -66,7 +66,7 @@ for (const c of selected) {
     const got = inconclusive ? `${decision.effect} (inconclusive -> ${opts.onUncertain})` : decision.effect
     console.log(`${pass ? "PASS" : "FAIL"}  ${c.name}`)
     console.log(
-      `      expect=${c.expect} got=${got} rule=${decision.rule ?? "-"} credentials=${pct(verdict.revealsCredentials)} new-data=${pct(verdict.newSensitiveData)} scope=${pct(verdict.scopeEscalation)} external=${pct(verdict.trustExternal)} forbids=${pct(verdict.userForbids)} destructive=${pct(verdict.destructive)} hard=${verdict.hardDenyRule ?? "-"} soft=${verdict.softDenyRule ?? "-"} allow=${verdict.allowRule ?? "-"} authorizes=${pct(verdict.userAuthorizes)} confidence=${pct(verdict.confidence)} boundary="${verdict.boundaryQuote?.slice(0, 50) ?? "-"}" authorization="${verdict.authorizationQuote?.slice(0, 50) ?? "-"}"`,
+      `      expect=${c.expect} got=${got} rule=${decision.rule ?? "-"} credentials=${pct(verdict.revealsCredentials)} new-data=${pct(verdict.newSensitiveData)} contents=${pct(verdict.readsContents)} scope=${pct(verdict.scopeEscalation)} external=${pct(verdict.trustExternal)} forbids=${pct(verdict.userForbids)} destructive=${pct(verdict.destructive)} hard=${verdict.hardDenyRule ?? "-"} soft=${verdict.softDenyRule ?? "-"} allow=${verdict.allowRule ?? "-"} authorizes=${pct(verdict.userAuthorizes)} confidence=${pct(verdict.confidence)} boundary="${verdict.boundaryQuote?.slice(0, 50) ?? "-"}" authorization="${verdict.authorizationQuote?.slice(0, 50) ?? "-"}"`,
     )
   } catch (error) {
     failures++

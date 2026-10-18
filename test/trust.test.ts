@@ -77,3 +77,49 @@ test("extractPaths ignores URLs, flags, and bare words", () => {
   assert.deepEqual(extractPaths("cat docs/a.md"), ["docs/a.md"])
   assert.deepEqual(extractPaths("grep -rn pulls ledger/"), ["ledger/"])
 })
+
+test("the executable is not a data target", () => {
+  // A Nix dev shell runs `node` from an absolute store path; the script it
+  // runs is still the data path and is inside the repo.
+  assert.deepEqual(extractPaths("/nix/store/0n6wnabi4grafrkvnla0ip529rqp6yxp-nodejs-24.19.0/bin/node eval/auto.eval.ts"), [
+    "eval/auto.eval.ts",
+  ])
+  assert.deepEqual(resolveTrust("shell", "node eval/auto.eval.ts", ROOTS, BASE), { inside: true, known: true })
+  assert.deepEqual(
+    resolveTrust("shell", "/nix/store/0n6wnabi4grafrkvnla0ip529rqp6yxp-nodejs-24.19.0/bin/node eval/auto.eval.ts", ROOTS, BASE),
+    { inside: true, known: true },
+  )
+  // A script argument outside the roots is still outside.
+  assert.deepEqual(
+    resolveTrust("shell", "/nix/store/0n6wnabi4grafrkvnla0ip529rqp6yxp-nodejs-24.19.0/bin/node /etc/foo.js", ROOTS, BASE),
+    { inside: false, known: true },
+  )
+})
+
+test("wrappers leave the following executable out of the data paths", () => {
+  const node = "/nix/store/hash-nodejs/bin/node"
+  assert.deepEqual(resolveTrust("shell", `sudo ${node} eval/run.ts`, ROOTS, BASE), { inside: true, known: true })
+  assert.deepEqual(resolveTrust("shell", `time ${node} eval/run.ts`, ROOTS, BASE), { inside: true, known: true })
+  assert.deepEqual(resolveTrust("shell", `env FOO=1 ${node} eval/run.ts`, ROOTS, BASE), { inside: true, known: true })
+  // A wrapper still does not hide an outside data argument.
+  assert.deepEqual(resolveTrust("shell", `sudo ${node} /etc/run.ts`, ROOTS, BASE), { inside: false, known: true })
+})
+
+test("options and assignments do not hide a data path", () => {
+  assert.deepEqual(resolveTrust("shell", "git -C /tmp status", ROOTS, BASE), { inside: false, known: true })
+  assert.deepEqual(resolveTrust("shell", "ls --color=auto /etc", ROOTS, BASE), { inside: false, known: true })
+  // An assignment is a data path, and `=` inside a plain path does not hide it.
+  assert.deepEqual(resolveTrust("shell", "DEST=/etc/x cp a b", ROOTS, BASE), { inside: false, known: true })
+  assert.deepEqual(resolveTrust("shell", `cat ${BASE}/a=b.md`, ROOTS, BASE), { inside: true, known: true })
+})
+
+test("a directory listing names the directory as a data path", () => {
+  // `ls` and `find` print names, not contents, but the directory they name is
+  // still a path outside the roots; whether that is sensitive is decided by
+  // the verdict, not by trust.
+  assert.deepEqual(resolveTrust("shell", "ls ~/.local/share/opencode", ROOTS, BASE), { inside: false, known: true })
+  assert.deepEqual(resolveTrust("shell", "find ~/.local/share/opencode -maxdepth 3 -type d", ROOTS, BASE), {
+    inside: false,
+    known: true,
+  })
+})

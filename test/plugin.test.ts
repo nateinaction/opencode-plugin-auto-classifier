@@ -54,6 +54,7 @@ function clean() {
     destructive: { noul: 0 },
     reveals_credentials: { noul: 0 },
     new_sensitive_data: { noul: 0 },
+    reads_contents: { noul: 1 },
     hard_deny_rule: { choice: "none", confidence: 0.95 },
     soft_deny_rule: { choice: "none", confidence: 0.95 },
     allow_rule: { choice: "none", confidence: 0.95 },

@@ -277,10 +277,12 @@ rather than a score escalator. The differences:
   auto-approval.
 - **Trust is resolved, not guessed.** The plugin resolves each path against the
   working directory, the scratch directory, and `git worktree list` entries of
-  the repository. Inside those roots an external claim cannot stand, and a
-  local, non-destructive, non-credential action is not scope-checked. The model
-  still answers `trust_external` for network commands, where only it can see
-  the destination.
+  the repository. The executable itself is a tool, not a data target: `/nix/store/.../bin/node
+  eval/run.ts` runs inside the repository, while a script argument (`/etc/run.js`)
+  is still resolved and counts. Inside those roots an external claim cannot
+  stand, and a local, non-destructive, non-credential action is not
+  scope-checked. The model still answers `trust_external` for network commands,
+  where only it can see the destination.
 - **One decision per command.** OpenCode asks permission for each part of a
   compound command separately. The plugin classifies the whole command once per
   tool call and every part inherits that decision, so `echo ---` in a pipeline
@@ -292,11 +294,12 @@ Precedence (applied in code): `hard_deny` → deny; a stated boundary → deny;
 matched `allow` entry → allow; then scope escalation or reaching outside the
 trusted environment, which deny only an action that is also destructive,
 reveals credentials, or carries new sensitive data out of the environment (a
-push counts as leaving), and never a local action that is neither destructive,
-credential-bearing, nor a push; then the severity backstop. A read *outside*
-the roots that carries new data asks instead of denying. `Irreversible Local
-Destruction` cannot fire when every file the action deletes is one this session
-wrote. Denials are labelled `[auto-classifier] [<Rule>] ...`.
+push counts as leaving; a listing that prints only names does not), and never a
+local action that is neither destructive, credential-bearing, nor a push; then
+the severity backstop. A read *outside* the roots that carries new data asks
+instead of denying. `Irreversible Local Destruction` cannot fire when every
+file the action deletes is one this session wrote. Denials are labelled
+`[auto-classifier] [<Rule>] ...`.
 
 ### Decision flow
 
@@ -316,7 +319,8 @@ probability; `score` places the answer on an ordered scale.
 | `authorization_span` | choice | the context statement that names and authorizes the action, or `none` |
 | `destructive` | noul | ≥ 0.5 makes the action sensitive; ≥ `denyDestructive` denies (off by default) |
 | `reveals_credentials` | noul | ≥ 0.5 makes the action sensitive wherever it stays, and stops an `allow` entry from clearing a soft rule; ≥ `denySecret` denies (off by default) |
-| `new_sensitive_data` | noul | ≥ 0.5 makes the action sensitive only when it leaves the environment (outbound, outside the roots, or a push) |
+| `new_sensitive_data` | noul | ≥ 0.5 makes the action sensitive only when it leaves the environment (outbound, outside the roots, or a push) **and** `reads_contents` is ≥ 0.5 |
+| `reads_contents` | noul | ≥ 0.5 when the action reads, prints, or sends file contents; a listing that prints only names or metadata is 0, so `ls`/`find` of an outside directory is not new sensitive data |
 | `scope_escalation` | noul | ≥ 0.5 on a sensitive action denies, unless the action stays inside the roots, is not destructive or credential-bearing, and does not push |
 | `trust_external` | noul | ≥ 0.5 on a sensitive action denies, unless the resolved paths are inside the roots (`ask` for a read outside) |
 | `risk` | score | ≥ `denyRisk` denies a shell command (off by default) |
@@ -362,7 +366,7 @@ flowchart TD
     cleared -- yes --> allowed
     soft -- no --> allowed{"allow_rule (choice) matched?"}
     allowed -- "yes: allow exception" --> allow
-    allowed -- no --> sensitive{"Sensitive? destructive >= 0.5, reveals_credentials >= 0.5, or new_sensitive_data >= 0.5 and leaving (outbound, outside the roots, or a push)"}
+    allowed -- no --> sensitive{"Sensitive? destructive >= 0.5, reveals_credentials >= 0.5, or new_sensitive_data >= 0.5 and reads_contents >= 0.5 and leaving (outbound, outside the roots, or a push)"}
     sensitive -- yes --> scope{"scope_escalation (noul) >= 0.5, and not a local, non-destructive, non-credential action?"}
     scope -- "yes: Scope Escalation" --> deny
     scope -- no --> external{"trust_external (noul) >= 0.5, after the trust resolver?"}
@@ -400,11 +404,14 @@ or `deny` to choose another policy; `fallback` never calls the fallback twice.
 
 Trust is resolved before the model's answer is read: the plugin canonicalises the
 working directory, the scratch directory, and `git worktree list --porcelain`
-entries of the repository, then resolves every path the action names. Inside
-those roots `trust_external` is treated as 0 and a local, non-destructive,
-non-credential action is not scope-checked. The model still decides
-`trust_external` for `webfetch`, `websearch`, and commands it classifies as
-`network`.
+entries of the repository, then resolves the arguments and redirection targets
+of every command. The executable is not a data target, and neither is the word
+after a wrapper such as `env`, `sudo`, `command`, or `time`, so an absolute
+interpreter path does not make an in-repo command external. A script argument
+still counts. Inside those roots `trust_external` is treated as 0 and a local,
+non-destructive, non-credential action is not scope-checked. The model still
+decides `trust_external` for `webfetch`, `websearch`, and commands it classifies
+as `network`.
 
 Review scope follows Claude Code: `shell`, `webfetch`, `websearch`,
 `external_directory`, and edits **outside** the working directory are

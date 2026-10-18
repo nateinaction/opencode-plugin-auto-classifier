@@ -36,22 +36,107 @@ function within(root: string, path: string): boolean {
 /** Device files are not a trust boundary: `2>/dev/null` is not "outside". */
 const DEVICE_PREFIX = "/dev/"
 
+/** Words that name another command word rather than a data target. */
+const WRAPPERS = new Set(["command", "env", "exec", "nohup", "sudo", "time"])
+
+/** Shell operators that start the next command. */
+const COMMAND_OPERATORS = new Set([";", "|", "&", "(", ")"])
+
+/** Shell operators whose following word is a redirection target. */
+const REDIRECT_OPERATORS = new Set(["<", ">"])
+
+/** A word that sets an environment variable for the command after it. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+type ShellToken = { kind: "word" | "operator"; text: string }
+
 /**
- * Pull path-like tokens out of a shell command. A bare word is not a path; a
- * URL is not a local path. A token holding a variable or a substitution cannot
- * be resolved before running, so the caller treats the whole action as unknown.
+ * Split a shell command into words and operators. Quotes are boundaries (the
+ * trust resolver only needs path-like words, not exact quoting); `=` stays
+ * inside a word so `FOO=1` is one assignment and `--flag=/etc/x` can still be
+ * read for its path.
+ */
+function tokenize(command: string): ShellToken[] {
+  const tokens: ShellToken[] = []
+  let word = ""
+  const flush = (): void => {
+    if (word) tokens.push({ kind: "word", text: word })
+    word = ""
+  }
+  for (const char of command) {
+    if (/\s/.test(char) || char === '"' || char === "'" || char === "`") {
+      flush()
+    } else if (COMMAND_OPERATORS.has(char) || REDIRECT_OPERATORS.has(char)) {
+      flush()
+      tokens.push({ kind: "operator", text: char })
+    } else {
+      word += char
+    }
+  }
+  flush()
+  return tokens
+}
+
+/** The last path component, so `/usr/bin/sudo` is also a wrapper. */
+function commandName(word: string): string {
+  const slash = word.lastIndexOf("/")
+  return slash === -1 ? word : word.slice(slash + 1)
+}
+
+/** True when `word` names a path rather than a bare word, flag, or URL. */
+function pathLike(word: string): boolean {
+  if (!word || word.startsWith(DEVICE_PREFIX)) return false
+  // `~` alone is the home directory; other bare words are arguments.
+  if (!word.includes("/") && word !== "~") return false
+  if (word.includes("://")) return false
+  return !word.startsWith("-")
+}
+
+/** The path a word names, looking past a `--flag=` or `VAR=` prefix. */
+function pathOf(word: string): string | undefined {
+  const equals = word.indexOf("=")
+  const prefixed = equals !== -1 && (word.startsWith("-") || ASSIGNMENT.test(word))
+  const path = prefixed ? word.slice(equals + 1) : word
+  return pathLike(path) ? path : undefined
+}
+
+/**
+ * Pull the data paths out of a shell command. The executable is a tool, not a
+ * data target: `/nix/store/<hash>/bin/node eval/run.ts` runs inside the
+ * working directory, while its script argument must still count. So the first
+ * word of each simple command is skipped, along with the word after `env`,
+ * `sudo`, `command`, and the like, and assignment words stay in command
+ * position. Redirection targets are data, so they count.
+ *
+ * A bare word is not a path; a URL is not a local path. A token holding a
+ * variable or a substitution cannot be resolved before running, so the caller
+ * treats the whole action as unknown before calling this.
  */
 export function extractPaths(command: string): string[] {
   const paths: string[] = []
-  for (const raw of command.split(/[\s;|&()<>"'`=,]+/)) {
-    const token = raw.trim()
-    if (!token) continue
-    if (token.startsWith(DEVICE_PREFIX)) continue
-    // `~` alone is the home directory; other bare words are arguments.
-    if (!token.includes("/") && token !== "~") continue
-    if (token.includes("://")) continue
-    if (token.startsWith("-")) continue
-    paths.push(token)
+  let expectCommand = true
+  for (const token of tokenize(command)) {
+    if (token.kind === "operator") {
+      // A redirection names a data target, so its word is not a command word.
+      expectCommand = COMMAND_OPERATORS.has(token.text)
+      continue
+    }
+    const word = token.text
+    if (expectCommand) {
+      // An assignment is data, but the command after it is still the command.
+      if (ASSIGNMENT.test(word)) {
+        const assigned = pathOf(word)
+        if (assigned) paths.push(assigned)
+        continue
+      }
+      // A wrapper's own options are flags; the executable comes after them.
+      if (word.startsWith("-")) continue
+      if (WRAPPERS.has(commandName(word))) continue
+      expectCommand = false
+      continue
+    }
+    const path = pathOf(word)
+    if (path) paths.push(path)
   }
   return paths
 }

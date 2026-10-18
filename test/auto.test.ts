@@ -24,6 +24,9 @@ function verdict(over: Partial<AutoVerdict> = {}): AutoVerdict {
     destructive: 0,
     revealsCredentials: 0,
     newSensitiveData: 0,
+    // A manually built verdict names content reads unless a case says otherwise:
+    // the metadata gate must be opted into, so older tests keep their meaning.
+    readsContents: 1,
     trustExternal: 0,
     userAuthorizes: 0,
     userForbids: 0,
@@ -235,6 +238,42 @@ test("a sensitive read outside the trusted roots asks instead of denying", () =>
   )
 })
 
+test("a listing outside the roots that prints no contents is allowed", () => {
+  const outside = { inside: false, known: true }
+  // `ls ~/.local/share/opencode`: names only, new-data 53%, external 79%,
+  // scope 87%. The plugin saw this as a sensitive outside read and asked.
+  const listing = verdict({
+    category: "read",
+    trustExternal: 0.79,
+    scopeEscalation: 0.87,
+    newSensitiveData: 0.53,
+    readsContents: 0.1,
+  })
+  assert.equal(decideAuto(listing, opts(), "shell", outside, "ls ~/.local/share/opencode").effect, "allow")
+  // `ls -la ... | head; ls .../log | head`: new-data 61%, external 77%.
+  assert.equal(
+    decideAuto(
+      verdict({ category: "read", trustExternal: 0.77, scopeEscalation: 0.85, newSensitiveData: 0.61, readsContents: 0.2 }),
+      opts(),
+      "shell",
+      outside,
+      "ls -la ~/.local/share/opencode | head -20; ls ~/.local/share/opencode/log | head",
+    ).effect,
+    "allow",
+  )
+  // Reading the contents of a database outside still asks (and #13 turns the
+  // ask into a denial); the metadata gate must not clear a content read.
+  const content = verdict({
+    category: "read",
+    trustExternal: 0.72,
+    newSensitiveData: 0.73,
+    readsContents: 0.9,
+  })
+  const read = decideAuto(content, opts(), "shell", outside, "sqlite3 -readonly ~/.local/share/opencode/opencode.db '.tables'")
+  assert.equal(read.effect, "ask")
+  assert.equal(read.rule, "External")
+})
+
 test("a tiered uncertain verdict allows local work and stops at the dangerous cases", () => {
   const inside = { inside: true, known: true }
   // `pytest`, `tail`, `echo` with new data 50-70%: the dominant false denial.
@@ -360,6 +399,11 @@ test("belowConfidence treats a near-threshold signal that flips the decision as 
   assert.equal(belowConfidence(verdict({ softDenyRule: "Git Destructive", userAuthorizes: 0.5 }), 0.6, opts()), true)
   // Trust only matters with a sensitive effect.
   assert.equal(belowConfidence(verdict({ trustExternal: 0.5, destructive: 0.6 }), 0.6, opts()), true)
+  // Whether the action reads contents decides new-data exposure outside.
+  assert.equal(
+    belowConfidence(verdict({ trustExternal: 0.9, newSensitiveData: 0.9, readsContents: 0.5 }), 0.6, opts()),
+    true,
+  )
   assert.equal(belowConfidence(verdict({ userForbids: 0.05 }), 0.6, opts()), false)
 })
 
