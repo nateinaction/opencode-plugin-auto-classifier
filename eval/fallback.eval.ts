@@ -21,7 +21,7 @@ import { normalize } from "../decide.ts"
 import { mergeRules } from "../rules.ts"
 import { buildAutoPrompt, parseAutoVerdict } from "../verdict.ts"
 import { contextSpans } from "../context.ts"
-import { caseState, caseTrust, selectCases, type Case } from "./cases.ts"
+import { caseAccepts, caseAction, caseResource, caseState, caseTrust, selectCases, type Case } from "./cases.ts"
 
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 const API_KEY_ENV = "OPENROUTER_API_KEY"
@@ -67,15 +67,17 @@ type Sample = { effect: "allow" | "ask" | "deny"; rule?: string } | { error: str
 async function sample(c: Case): Promise<Sample> {
   try {
     const state = caseState(c)
+    const action = caseAction(c)
+    const resource = caseResource(c)
     const spans = contextSpans(state)
     const verdict = parseAutoVerdict(await complete(buildAutoPrompt(state, rules)), "fallback", spans)
     // Mirror the plugin: a fallback answer is below the confidence floor, so
     // "tiered" (the default) marks it uncertain and the facts decide.
     const routed =
-      belowConfidence(verdict, opts.confidenceFloor, opts, "shell") && opts.onUncertain === "tiered"
+      belowConfidence(verdict, opts.confidenceFloor, opts, action) && opts.onUncertain === "tiered"
         ? { ...verdict, uncertain: true }
         : verdict
-    const decision = decideAuto(routed, opts, "shell", caseTrust(c), c.resource)
+    const decision = decideAuto(routed, opts, action, caseTrust(c), resource)
     return { effect: decision.effect, rule: decision.rule }
   } catch (error) {
     return { error: String(error).slice(0, 200) }
@@ -100,7 +102,7 @@ async function runCase(c: Case): Promise<Outcome> {
   const results = await Promise.all(Array.from({ length: samples }, () => sample(c)))
   const seconds = (Date.now() - started) / 1000
   const decided = results.filter((r): r is Exclude<Sample, { error: string }> => !("error" in r))
-  const right = decided.filter((r) => r.effect === c.expect).length
+  const right = decided.filter((r) => caseAccepts(c, r.effect)).length
   const flips = new Set(decided.map((r) => r.effect)).size > 1
   const mark = right === samples ? "PASS " : flips ? "FLIP " : "FAIL "
   const errors = results.filter((r): r is { error: string } => "error" in r)
@@ -114,12 +116,17 @@ async function runCase(c: Case): Promise<Outcome> {
 }
 
 const selected = selectCases(process.env.EVAL_FILTER ?? "")
-// Cases run in a pool of CASE_CONCURRENCY workers, each case's samples in
-// parallel: at most CASE_CONCURRENCY * EVAL_SAMPLES requests in flight. The
+// Cases run in a pool of EVAL_CONCURRENCY workers, each case's samples in
+// parallel: at most EVAL_CONCURRENCY * EVAL_SAMPLES requests in flight. The
 // upstream latency varies from seconds to past the timeout, so a sequential
-// run waits on the slowest sample of every case in turn.
-const CASE_CONCURRENCY = 6
-console.log(`fallback model: ${model}, ${samples} samples per case, ${CASE_CONCURRENCY} cases at a time\n`)
+// run waits on the slowest sample of every case in turn. Lower the pool when
+// the provider answers 402 ("would exceed your available credits given your
+// current in-flight requests"), which is about pressure, not balance.
+const requested = Number(process.env.EVAL_CONCURRENCY ?? "6")
+const CASE_CONCURRENCY = Number.isInteger(requested) && requested >= 1 ? Math.min(requested, 6) : 6
+console.log(
+  `fallback model: ${model}, ${samples} samples per case, ${CASE_CONCURRENCY} cases at a time\n`,
+)
 
 const outcomes: Outcome[] = []
 let next = 0

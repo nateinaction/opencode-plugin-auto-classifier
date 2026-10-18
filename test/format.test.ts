@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { colorFor, compact, GREEN, line, mark, ORANGE, RED, RESOURCE_MAX, stamp, trim, type Entry } from "../format.ts"
+import { clip, colorFor, compact, GREEN, line, mark, ORANGE, RED, RESOURCE_MAX, stamp, trim, type Entry } from "../format.ts"
 
 function entry(over: Partial<Entry> = {}): Entry {
   return { at: 0, action: "shell", resource: "ls", effect: "allow", reason: "", via: "jev", ...over }
@@ -35,6 +35,23 @@ test("trim truncates to RESOURCE_MAX with an ellipsis", () => {
 test("trim leaves short text untouched", () => {
   const short = "x".repeat(RESOURCE_MAX)
   assert.equal(trim(short), short)
+})
+
+test("clip keeps both ends of a long state and names what it dropped", () => {
+  const state = `HEAD ${"a".repeat(4000)} TAIL`
+  const out = clip(state, 1000)
+  assert.ok(out.length <= 1000, `clipped to ${out.length} chars`)
+  assert.ok(out.startsWith("HEAD "), "the request at the head survives")
+  assert.ok(out.endsWith(" TAIL"), "the action at the tail survives")
+  const reported = Number(out.match(/\[(\d+) chars elided\]/)?.[1])
+  const kept = out.replace(/\u2026 \[\d+ chars elided\] \u2026/, "")
+  assert.equal(reported, state.length - kept.length, "the marker reports the characters it dropped")
+  for (const limit of [60, 101, 999]) assert.ok(clip(state, limit).length <= limit, `limit ${limit} is honored`)
+})
+
+test("clip leaves short text and a zero limit alone", () => {
+  assert.equal(clip("short state", 100), "short state")
+  assert.equal(clip("anything", 0), "anything")
 })
 
 test("line renders mark, action and resource", () => {

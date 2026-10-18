@@ -12,7 +12,7 @@ import { belowConfidence, decideAuto } from "../auto.ts"
 import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "../jev.ts"
 import { mergeRules } from "../rules.ts"
 import { contextSpans } from "../context.ts"
-import { caseState, caseTrust, selectCases } from "./cases.ts"
+import { caseAccepts, caseAction, caseResource, caseState, caseTrust, selectCases } from "./cases.ts"
 
 const opts = normalize({ mode: "auto-mode", provider: "openrouter" })
 const apiKeyEnv = PROVIDER_DEFAULTS.openrouter.apiKeyEnv
@@ -42,6 +42,8 @@ const inconclusiveCases: string[] = []
 const acceptLetsThrough: string[] = []
 for (const c of selected) {
   const state = caseState(c)
+  const action = caseAction(c)
+  const resource = caseResource(c)
   try {
     // The statements a boundary or authorization answer must quote, from the
     // same state the model reads, exactly as the plugin does it.
@@ -50,23 +52,24 @@ for (const c of selected) {
     const verdict = parseAutoAnswers(answers, spans)
     verdict.source = "openrouter"
     const facts = caseTrust(c)
-    const inconclusive = belowConfidence(verdict, opts.confidenceFloor, opts, "shell")
-    const accepted = decideAuto(verdict, opts, "shell", facts, c.resource)
+    const inconclusive = belowConfidence(verdict, opts.confidenceFloor, opts, action)
+    const accepted = decideAuto(verdict, opts, action, facts, resource)
     const routed =
       inconclusive && (opts.onUncertain === "tiered" || opts.onUncertain === "deny")
         ? { ...verdict, uncertain: true }
         : verdict
-    const decision = decideAuto(routed, opts, "shell", facts, c.resource)
-    const pass = decision.effect === c.expect
+    const decision = decideAuto(routed, opts, action, facts, resource)
+    const pass = caseAccepts(c, decision.effect)
     if (!pass) failures++
-    if (accepted.effect === c.expect) acceptRight++
-    if ((inconclusive ? "deny" : accepted.effect) === c.expect) denyRight++
+    if (caseAccepts(c, accepted.effect)) acceptRight++
+    if (caseAccepts(c, inconclusive ? "deny" : accepted.effect)) denyRight++
     if (inconclusive) inconclusiveCases.push(c.name)
     if (inconclusive && c.expect === "deny" && accepted.effect === "allow") acceptLetsThrough.push(c.name)
     const got = inconclusive ? `${decision.effect} (inconclusive -> ${opts.onUncertain})` : decision.effect
     console.log(`${pass ? "PASS" : "FAIL"}  ${c.name}`)
+    const also = c.alsoAccept?.length ? ` also=${c.alsoAccept.join("|")}` : ""
     console.log(
-      `      expect=${c.expect} got=${got} rule=${decision.rule ?? "-"} credentials=${pct(verdict.revealsCredentials)} new-data=${pct(verdict.newSensitiveData)} contents=${pct(verdict.readsContents)} scope=${pct(verdict.scopeEscalation)} external=${pct(verdict.trustExternal)} forbids=${pct(verdict.userForbids)} destructive=${pct(verdict.destructive)} hard=${verdict.hardDenyRule ?? "-"} soft=${verdict.softDenyRule ?? "-"} allow=${verdict.allowRule ?? "-"} authorizes=${pct(verdict.userAuthorizes)} confidence=${pct(verdict.confidence)} boundary="${verdict.boundaryQuote?.slice(0, 50) ?? "-"}" authorization="${verdict.authorizationQuote?.slice(0, 50) ?? "-"}"`,
+      `      action=${action} expect=${c.expect}${also} got=${got} rule=${decision.rule ?? "-"} category=${verdict.category ?? "-"} credentials=${pct(verdict.revealsCredentials)} new-data=${pct(verdict.newSensitiveData)} contents=${pct(verdict.readsContents)} scope=${pct(verdict.scopeEscalation)} external=${pct(verdict.trustExternal)} forbids=${pct(verdict.userForbids)} destructive=${pct(verdict.destructive)} hard=${verdict.hardDenyRule ?? "-"} soft=${verdict.softDenyRule ?? "-"} allow=${verdict.allowRule ?? "-"} authorizes=${pct(verdict.userAuthorizes)} confidence=${pct(verdict.confidence)} boundary="${verdict.boundaryQuote?.slice(0, 50) ?? "-"}" authorization="${verdict.authorizationQuote?.slice(0, 50) ?? "-"}"`,
     )
   } catch (error) {
     failures++

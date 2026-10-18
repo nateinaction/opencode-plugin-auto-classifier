@@ -381,6 +381,35 @@ export function denyMessage(decision: AutoDecision): string {
   return `[auto-classifier] ${tag}${decision.reason}`
 }
 
+/**
+ * Every answer in a verdict on one line, for `auto_classifier_explain` and for
+ * a human reading a denial: what the model was asked, in the order the
+ * precedence applies it.
+ */
+export function describeAnswers(verdict: AutoVerdict): string {
+  const rule = (value: string | undefined): string => ruleName(value) ?? "-"
+  const bits = [
+    `category=${verdict.category ?? "-"}`,
+    `risk=${pct(verdict.risk)}`,
+    `destructive=${pct(verdict.destructive)}`,
+    `credentials=${pct(verdict.revealsCredentials)}`,
+    `new-data=${pct(verdict.newSensitiveData)}`,
+    `contents=${pct(verdict.readsContents)}`,
+    `scope=${pct(verdict.scopeEscalation)}`,
+    `external=${pct(verdict.trustExternal)}`,
+    `forbids=${pct(verdict.userForbids)}`,
+    `authorizes=${pct(verdict.userAuthorizes)}`,
+    `confidence=${pct(verdict.confidence)}`,
+    `hard=${rule(verdict.hardDenyRule)}`,
+    `soft=${rule(verdict.softDenyRule)}`,
+    `allow=${rule(verdict.allowRule)}`,
+    `via=${verdict.source ?? "jev"}`,
+  ]
+  const quote = (label: string, text: string | undefined): string[] => (text ? [`${label}="${text}"`] : [])
+  const quotes = [...quote("boundary", verdict.boundaryQuote), ...quote("authorization", verdict.authorizationQuote)]
+  return [...bits, ...quotes].join(" ")
+}
+
 /** Yes/no signals that can only clear an action (permissive) or only block it (restrictive). */
 const PERMISSIVE_SIGNALS = ["userAuthorizes"] as const
 const RESTRICTIVE_SIGNALS = [

@@ -35,6 +35,8 @@ interface Harness {
   evaluate: Evaluate
   /** The registered `execute.before`/`execute.after` handler. */
   tool: (name: string) => ToolHandler | undefined
+  /** A tool definition the plugin registered through `ctx.tool.transform`. */
+  added: (name: string) => ToolDefinition | undefined
   /** The inputs `session.get` received, in order. */
   gets: Array<{ sessionID: string }>
   /** Prompts sent to the LLM fallback. */
@@ -44,6 +46,13 @@ interface Harness {
   /** The debug log's contents, once an append matching `until` has landed. */
   log: (until?: RegExp) => Promise<string>
   dispose: () => Promise<void>
+}
+
+type ToolDefinition = {
+  name: string
+  description: string
+  input: unknown
+  execute: (input: any, context: any) => Promise<{ content: string; metadata: any }>
 }
 
 /** A Jev answer set that matches no rule and rates the action harmless. */
@@ -77,6 +86,7 @@ async function harness(input: HarnessInput = {}): Promise<Harness> {
   const prompts: string[] = []
   const requests: string[] = []
   const tools = new Map<string, ToolHandler>()
+  const added = new Map<string, ToolDefinition>()
   let evaluate: Evaluate | undefined
 
   const originalFetch = globalThis.fetch
@@ -112,7 +122,10 @@ async function harness(input: HarnessInput = {}): Promise<Harness> {
         tools.set(name, callback)
         return { dispose: async () => {} }
       },
-      transform: async () => ({ dispose: async () => {} }),
+      transform: async (fn: (editor: { add: (tool: ToolDefinition) => void }) => void) => {
+        fn({ add: (tool) => added.set(tool.name, tool) })
+        return { dispose: async () => {} }
+      },
     },
     permission: {
       hook: async (_name: string, callback: Evaluate) => {
@@ -134,6 +147,7 @@ async function harness(input: HarnessInput = {}): Promise<Harness> {
   return {
     evaluate,
     tool: (name) => tools.get(name),
+    added: (name) => added.get(name),
     gets,
     prompts,
     requests,
@@ -315,4 +329,66 @@ test("a classifier error fails closed and names the cause", async (t) => {
   assert.match(e.message ?? "", /ECONNREFUSED/)
   const log = await h.log(/auto classification failed/)
   assert.match(log, /auto classification failed/)
+})
+
+test("the explain tool re-runs a decision and prints every answer", async (t) => {
+  const h = await harness({
+    reply: () => ({ ...clean(), allow_rule: { choice: "Local Operations", confidence: 0.95 } }),
+  })
+  t.after(h.dispose)
+  const tool = h.added("auto_classifier_explain")
+  if (!tool) throw new Error("setup did not register auto_classifier_explain")
+
+  const result = await tool.execute(
+    { resource: "pytest -q scripts/tests" },
+    { sessionID: SESSION, signal: new AbortController().signal },
+  )
+
+  assert.match(result.content, /^action: shell$/m)
+  assert.match(result.content, /^resource: pytest -q scripts\/tests$/m)
+  assert.match(result.content, /^trust: inside=true known=true$/m)
+  assert.match(result.content, /^user rules: none$/m)
+  assert.match(result.content, /allow=Local Operations/)
+  assert.match(result.content, /^source: jev$/m)
+  assert.match(result.content, /^uncertain: no$/m)
+  assert.match(result.content, /^decision: allow \[Local Operations\]/m)
+  assert.match(result.content, /^state:\n/m)
+  assert.ok(result.content.includes("ENVIRONMENT:"), "the explainer prints the classified state")
+  assert.equal(result.metadata.effect, "allow")
+  assert.equal(result.metadata.rule, "Local Operations")
+  // The explainer uses the calling session when none is given.
+  assert.equal(h.gets.at(-1)?.sessionID, SESSION)
+})
+
+test("the explain tool names the rule behind a denial", async (t) => {
+  const h = await harness({ reply: () => denied() })
+  t.after(h.dispose)
+  const tool = h.added("auto_classifier_explain")
+  if (!tool) throw new Error("setup did not register auto_classifier_explain")
+
+  const result = await tool.execute({ resource: "cat .env" }, { sessionID: SESSION, signal: new AbortController().signal })
+
+  assert.match(result.content, /^decision: deny \[Data Exfiltration\]/m)
+  assert.equal(result.metadata.effect, "deny")
+  assert.equal(result.metadata.rule, "Data Exfiltration")
+})
+
+test("the classified log carries the state, truncated", async (t) => {
+  const h = await harness()
+  t.after(h.dispose)
+  const long = `echo ${"x".repeat(4000)}`
+
+  await h.evaluate(event("shell", long))
+
+  const log = await h.log(/chars elided/)
+  const row = log.split("\n").find((line) => line.includes('"state":"'))
+  assert.ok(row, "the classified line carries a state")
+  const entry = JSON.parse(row.slice(row.indexOf("{")))
+  const sent = h.requests[0]
+  assert.ok(sent, "the state was sent to Jev")
+  assert.ok(entry.state.length < sent.length, "the logged state is truncated")
+  assert.ok(entry.state.length <= 3000, "the logged state is bounded")
+  assert.match(entry.state, /chars elided/)
+  assert.equal(entry.state.slice(0, 40), sent.slice(0, 40), "the head survives")
+  assert.ok(entry.state.endsWith(sent.slice(-40)), "the action at the tail survives")
 })

@@ -205,7 +205,7 @@ passed through the object form:
 | `fallbackModel`    | `opencode-go/deepseek-v4.1-flash` | `provider/model` used for the fallback       |
 | `failMode`         | `open`           | `open` leaves the decision unchanged on error; `closed` escalates |
 | `cacheTtlMs`       | `300000`         | Classification cache TTL                                      |
-| `debug`            | `false`          | Log each classification to `debugLog`                         |
+| `debug`            | `false`          | Log each classification to `debugLog` (in auto-mode: the verdict, the decision, and the assembled state, truncated) |
 | `debugLog`         | `~/.local/share/opencode/log/auto-classifier.log` | File `debug` appends to (honours `XDG_DATA_HOME`) |
 
 There are two tiers: the `deny*` thresholds always deny, and the `ask*`
@@ -275,6 +275,11 @@ rather than a score escalator. The differences:
   costs no request after the classification cache expires either. An allow also
   resets the consecutive-block counter, so one false denial cannot pause
   auto-approval.
+- **The log can be audited.** Debug lines carry the resource, the verdict, the
+  decision, and the assembled state (truncated in the middle, keeping the
+  context at the head and the action at the tail), so a denial can be reviewed
+  later without a transcript. The `auto_classifier_explain` tool re-runs one
+  decision and prints every answer behind it.
 - **Trust is resolved, not guessed.** The plugin resolves each path against the
   working directory, the scratch directory, and `git worktree list` entries of
   the repository. The executable itself is a tool, not a data target: `/nix/store/.../bin/node
@@ -466,6 +471,38 @@ any command on demand:
 jev_classify_command({ "command": "rm -rf ./build" })
 ```
 
+In auto-mode it also registers `auto_classifier_rules` (the effective rule lists)
+and `auto_classifier_explain`, which re-runs one decision and prints the facts,
+every answer, and the rule that settled it:
+
+```
+auto_classifier_explain({ "resource": "pytest -q scripts/tests" })
+auto_classifier_explain({ "action": "read", "resource": "~/.local/share/opencode/log/auto-classifier.log" })
+auto_classifier_explain({ "resource": "tail -40", "command": "pytest -q scripts/tests 2>&1 | tail -40" })
+```
+
+`resource` is the command or path the permission request named. `action`
+defaults to `shell`; `command` names the whole compound command when `resource`
+is one part of it; `sessionID` defaults to the calling session. The output has
+the form:
+
+```
+action: shell
+resource: pytest -q scripts/tests
+trust: inside=true known=true
+user rules: none
+verdict: category=read risk=0% destructive=0% credentials=2% new-data=8% contents=74% scope=31% external=5% forbids=0% authorizes=0% confidence=99% hard=- soft=- allow=Local Operations via=openrouter
+source: jev
+uncertain: no
+decision: allow [Local Operations] Matched allow rule [Local Operations]. ...
+state:
+ENVIRONMENT:
+...
+```
+
+It costs one Jev request per distinct state (the same cache as the hook), and it
+is the fastest way to answer "why was this denied?" without reading the log.
+
 ## Examples (live results)
 
 | Action | Resource                         | Category | Risk | Destructive | Secret | Effect |
@@ -521,6 +558,36 @@ npm run test:watch
 
 Tests use Node's built-in test runner and Node's native TypeScript type
 stripping, so there is nothing to build and no dev dependencies to install.
+
+### Evals and the denial corpus
+
+`eval/cases.ts` holds the hand-written cases; `eval/denials.ts` holds the 63
+false denials of 2026-10-17, one case per denial, from the debug log and issue
+#2 (35 classified, 6 fail-closed, 22 in the retro session). Each corpus case
+records the action the log recorded, the request the session was answering, and
+the decision the rules now reach; where the old build did not log something (the
+prompt, the whole compound command, the resource of a failed classification) the
+entry says so. `test/denials.test.ts` pins the corpus's invariants without a
+network call, including that no case accepts a denial.
+
+Both live evals run the hand-written cases and the corpus:
+
+```sh
+OPENROUTER_API_KEY=... npm run eval             # Jev answers; one request per case
+OPENROUTER_API_KEY=... npm run eval:fallback    # parseAutoVerdict; samples per case
+```
+
+| Variable | Applies to | Effect |
+| --- | --- | --- |
+| `EVAL_FILTER` | both | Run only cases whose name contains the substring, e.g. `EVAL_FILTER=21:` |
+| `EVAL_SAMPLES` | fallback | Samples per case, 1-10 (default 5) |
+| `EVAL_CONCURRENCY` | fallback | Cases in flight, 1-6 (default 6); lower it when the provider answers 402 for in-flight pressure |
+| `FALLBACK_MODEL` | fallback | The OpenRouter model id used as the fallback, default `deepseek/deepseek-v4.1-flash` |
+
+The Jev eval routes an inconclusive verdict through `onUncertain` exactly as the
+plugin does, so it measures the configured policy rather than the raw answers;
+the fallback eval reports how many samples per case reach an accepted outcome
+and which cases flip between samples.
 
 ## Fallback
 

@@ -6,6 +6,7 @@ import {
   belowConfidence,
   coverageFor,
   decideAuto,
+  describeAnswers,
   matchPermissionRule,
   permissionPolicy,
   reachedPause,
@@ -126,6 +127,141 @@ test("a matched allow rule outranks scope and trust", () => {
   assert.equal(
     decideAuto(verdict({ allowRule: "Read-Only HTTP", newSensitiveData: 0.55, scopeEscalation: 0.6 }), opts()).effect,
     "allow",
+  )
+})
+
+test("precedence: the first matching step decides", () => {
+  // The table is the contract; `decideAuto` implements it in this order. Each
+  // row carries the answers that would flip the later steps, so a row only
+  // passes while the earlier step still wins.
+  const inside = { inside: true, known: true, written: false }
+  const outside = { inside: false, known: true, written: false }
+  const rows: Array<{
+    step: string
+    verdict: Partial<AutoVerdict>
+    facts?: typeof inside
+    action?: string
+    options?: Options
+    effect: "allow" | "ask" | "deny"
+    rule?: string
+  }> = [
+    {
+      step: "hard deny, over a boundary and an allow rule",
+      verdict: { hardDenyRule: "Data Exfiltration", userForbids: 1, allowRule: "Local Operations", destructive: 1 },
+      effect: "deny",
+      rule: "Data Exfiltration",
+    },
+    {
+      step: "a stated boundary, over an allow rule and destruction",
+      verdict: { userForbids: 0.9, allowRule: "Local Operations", destructive: 0.9 },
+      effect: "deny",
+      rule: "User Boundary",
+    },
+    {
+      step: "a soft rule, over scope and an allow rule it cannot clear",
+      verdict: { softDenyRule: "Credential Printing", allowRule: "Local Operations", revealsCredentials: 0.9, scopeEscalation: 1 },
+      effect: "deny",
+      rule: "Credential Printing",
+    },
+    {
+      step: "a soft rule cleared by an allow rule",
+      verdict: { softDenyRule: "Git Destructive", allowRule: "Local Operations", destructive: 0.9 },
+      effect: "allow",
+      rule: "Local Operations",
+    },
+    {
+      step: "a soft rule cleared by the user's quoted intent",
+      verdict: { softDenyRule: "Git Destructive", userAuthorizes: 0.9 },
+      effect: "allow",
+    },
+    {
+      step: "an allow rule, over destruction, scope, and trust",
+      verdict: { allowRule: "Local Operations", destructive: 0.9, scopeEscalation: 1, trustExternal: 1 },
+      effect: "allow",
+      rule: "Local Operations",
+    },
+    {
+      step: "a credential, over an allow rule and scope",
+      verdict: { allowRule: "Local Operations", revealsCredentials: 0.9, scopeEscalation: 0.9 },
+      effect: "deny",
+      rule: "Scope Escalation",
+    },
+    {
+      step: "scope escalation, on a sensitive action",
+      verdict: { scopeEscalation: 0.9, destructive: 0.9 },
+      effect: "deny",
+      rule: "Scope Escalation",
+    },
+    {
+      step: "scope escalation, with nothing sensitive",
+      verdict: { scopeEscalation: 0.9 },
+      effect: "allow",
+    },
+    {
+      step: "an outside read that carries new data: ask",
+      verdict: { newSensitiveData: 0.9, readsContents: 1, category: "read" },
+      facts: outside,
+      effect: "ask",
+      rule: "External",
+    },
+    {
+      step: "an outside write that carries new data: deny",
+      verdict: { newSensitiveData: 0.9, readsContents: 1, category: "write" },
+      facts: outside,
+      effect: "deny",
+      rule: "External",
+    },
+    {
+      step: "an outside action with nothing sensitive",
+      verdict: { category: "read" },
+      facts: outside,
+      effect: "allow",
+    },
+    {
+      step: "the severity backstop, when configured",
+      verdict: { destructive: 0.98 },
+      options: { denyDestructive: 0.97 },
+      effect: "deny",
+      rule: "Destructive",
+    },
+    {
+      step: "nothing matches: allow",
+      verdict: {},
+      effect: "allow",
+    },
+  ]
+
+  for (const row of rows) {
+    const d = decideAuto(verdict(row.verdict), opts(row.options), row.action ?? "shell", row.facts)
+    assert.equal(d.effect, row.effect, `${row.step}: ${d.reason}`)
+    assert.equal(d.rule, row.rule, `${row.step}: rule`)
+  }
+})
+
+test("describeAnswers names every answer, its rule labels, and any quoted intent", () => {
+  const text = describeAnswers(
+    verdict({
+      category: "read",
+      risk: 0.01,
+      destructive: 0.02,
+      revealsCredentials: 0.5,
+      newSensitiveData: 0.4,
+      readsContents: 1,
+      hardDenyRule: "none",
+      softDenyRule: "none",
+      allowRule: "Local Operations",
+      trustExternal: 0.1,
+      userForbids: 0.2,
+      userAuthorizes: 0.3,
+      confidence: 0.9,
+      boundaryQuote: "don't push",
+      source: "openrouter",
+    }),
+  )
+
+  assert.equal(
+    text,
+    'category=read risk=1% destructive=2% credentials=50% new-data=40% contents=100% scope=0% external=10% forbids=20% authorizes=30% confidence=90% hard=- soft=- allow=Local Operations via=openrouter boundary="don\'t push"',
   )
 })
 

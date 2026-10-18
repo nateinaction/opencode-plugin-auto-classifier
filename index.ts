@@ -59,11 +59,12 @@ import {
 } from "./decide.ts"
 import { mergeRules } from "./rules.ts"
 import { buildState, contextSpans } from "./context.ts"
-import { compact, type Entry } from "./format.ts"
+import { clip, compact, type Entry } from "./format.ts"
 import {
   autoAuthority,
   belowConfidence,
   coverageFor,
+  describeAnswers,
   permissionPolicy,
   reachedPause,
   reconcileFallback,
@@ -471,6 +472,47 @@ export default {
       }
     }
 
+    /**
+     * The state and resolved facts for one action, as the permission hook
+     * assembles them. The explain tool reuses this so its re-run sees exactly
+     * what the hook saw: the same instructions, the user's own words, the
+     * resolved trust roots, and the files the session wrote.
+     */
+    async function assemble(
+      resource: string,
+      action: string,
+      sessionID: string,
+    ): Promise<{ label: string; state: string; action: string; trust: ActionFacts }> {
+      const instructionText = opts.conversationContext === "none" ? undefined : await instructions()
+      const prompts = opts.conversationContext === "none" ? [] : await userPrompts(sessionID)
+      const transcriptText = opts.conversationContext === "session" ? await sessionTranscript(sessionID) : undefined
+      // The files this session wrote, so the model can apply `Irreversible
+      // Local Destruction` as written instead of guessing provenance.
+      const written = writtenIn(sessionID)
+      const trust = resolveTrust(action, resource, trustedRoots, baseDir())
+      const facts: ActionFacts = { ...trust, written: deletesOnlySessionWrites(action, resource, written, baseDir()) }
+      const state = buildState({
+        mode: opts.conversationContext,
+        instructions: instructionText,
+        userPrompt: prompts.at(-1),
+        earlierPrompts: prompts.slice(0, -1).map((text) => text.slice(0, EARLIER_PROMPT_CHARS)),
+        transcript: transcriptText,
+        action,
+        resource,
+        directory: baseDir(),
+        scratch: scratchDirs,
+        writes: [...written].slice(-WRITES_IN_STATE),
+      })
+      return { label: resource, state, action, trust: facts }
+    }
+
+    // The classified state is logged truncated: it carries the instructions and
+    // requests the model reasoned over plus the action under classification,
+    // which is what a later review of a denial needs, but a session's whole
+    // context does not belong in a shared log file. The head keeps the
+    // instructions, the tail the environment and the action.
+    const STATE_LOG_CHARS = 3000
+
     async function classifyAutoAll(
       items: Array<{ label: string; state: string; action: string; trust: ActionFacts }>,
       signal?: AbortSignal,
@@ -481,7 +523,15 @@ export default {
         const decision = reconcileFallback(verdict, prior, opts, item.action, item.trust, item.label)
         log(
           "classified",
-          JSON.stringify({ mode: "auto", resource: item.label, effect: decision.effect, rule: decision.rule, trust: item.trust, verdict }),
+          JSON.stringify({
+            mode: "auto",
+            resource: item.label,
+            effect: decision.effect,
+            rule: decision.rule,
+            trust: item.trust,
+            state: clip(item.state, STATE_LOG_CHARS),
+            verdict,
+          }),
         )
         recordEntry({
           at: Date.now(),
@@ -698,44 +748,12 @@ export default {
         log("decision reused", JSON.stringify({ action, commandKey, effect: settled.effect, rule: settled.rule }))
         decision = settled
       } else {
-        const instructionText = opts.conversationContext === "none" ? undefined : await instructions()
-        const prompts = opts.conversationContext === "none" ? [] : await userPrompts(event.sessionID)
-        const promptText = prompts.at(-1)
-        const earlierPrompts = prompts.slice(0, -1).map((text) => text.slice(0, EARLIER_PROMPT_CHARS))
-        const transcriptText = opts.conversationContext === "session" ? await sessionTranscript(event.sessionID) : undefined
         // Classify the whole command once. Its parts are only the resources to
         // judge when the whole command is unavailable.
         const targets = command ? [command] : resources
-        // The files this session wrote, so the model can apply `Irreversible
-        // Local Destruction` as written instead of guessing provenance.
-        const written = writtenIn(event.sessionID)
-        const recentWrites = [...written].slice(-WRITES_IN_STATE)
-        const items = targets.map((resource) => {
-          const trust = resolveTrust(action, resource, trustedRoots, baseDir())
-          const facts: ActionFacts = {
-            ...trust,
-            written: deletesOnlySessionWrites(action, resource, written, baseDir()),
-          }
-          return {
-            label: resource,
-            action,
-            trust: facts,
-            state: buildState({
-              mode: opts.conversationContext,
-              instructions: instructionText,
-              userPrompt: promptText,
-              earlierPrompts,
-              transcript: transcriptText,
-              action,
-              resource,
-              // The target is the whole command, so it already carries it.
-              command: resource === command ? undefined : command,
-              directory: baseDir(),
-              scratch: scratchDirs,
-              writes: recentWrites,
-            }),
-          }
-        })
+        // The state, trust facts, and provenance, assembled once per target by
+        // the same helper `auto_classifier_explain` uses to re-run a decision.
+        const items = await Promise.all(targets.map((resource) => assemble(resource, action, event.sessionID)))
 
         // A session remembers its decisions, so a repeated check (a hook, a
         // retried command, the same part asked twice) costs no request for the
@@ -827,6 +845,76 @@ export default {
           execute: async () => {
             const body = JSON.stringify(rules, null, 2)
             return { content: body, metadata: rules }
+          },
+        })
+      })
+
+      // Re-run a decision and show every answer behind it. The debug log says
+      // what was denied but not why; this asks the classifier again with the
+      // same state the permission hook assembled and prints the facts, the
+      // answers, and the precedence step that settled it.
+      await ctx.tool.transform((editor: any) => {
+        editor.add({
+          name: "auto_classifier_explain",
+          description:
+            "Re-run an auto-mode classification and print every answer behind the decision: the resolved trust facts, each Jev answer, whether the verdict was inconclusive, and the resulting allow/ask/deny with its rule. Use it to explain why an action was denied or to pre-check one before running it.",
+          input: {
+            type: "object",
+            properties: {
+              resource: { type: "string", description: "The command or path the permission request named." },
+              action: {
+                type: "string",
+                description:
+                  "The permission action: shell (default), read, edit, webfetch, websearch, external_directory.",
+              },
+              command: {
+                type: "string",
+                description: "The whole compound command `resource` is one part of, when it is not the whole action.",
+              },
+              sessionID: { type: "string", description: "The session whose instructions and requests to include. Defaults to the calling session." },
+            },
+            required: ["resource"],
+            additionalProperties: false,
+          },
+          execute: async (
+            input: { resource: string; action?: string; command?: string; sessionID?: string },
+            context: { signal?: AbortSignal; sessionID?: string },
+          ) => {
+            const action = input.action?.trim() || "shell"
+            // The whole command is what the hook classifies, so it is the
+            // action the explainer must judge too.
+            const target = input.command?.trim() || input.resource
+            const sessionID = input.sessionID?.trim() || String(context?.sessionID ?? "")
+            const item = await assemble(target, action, sessionID)
+            const { verdict, prior } = await classifyAuto(item.state, action, context?.signal)
+            const decision = reconcileFallback(verdict, prior, opts, action, item.trust, item.label)
+            const user = await userRules(sessionID, action, [item.label])
+            const source = verdict.source === "fallback" ? (prior ? "LLM fallback (Jev was inconclusive)" : "LLM fallback (Jev failed)") : (verdict.source ?? "jev")
+            const lines = [
+              `action: ${action}`,
+              `resource: ${item.label}`,
+              `trust: inside=${item.trust.inside} known=${item.trust.known}${item.trust.written ? " written=session" : ""}`,
+              `user rules: ${user.known ? [user.allow ? "allow" : "", user.ask ? "ask" : ""].filter(Boolean).join(", ") || "none" : "unreadable (a prompt is kept)"}`,
+              `verdict: ${describeAnswers(verdict)}`,
+              `source: ${source}`,
+              `uncertain: ${verdict.uncertain ? `yes (onUncertain=${opts.onUncertain})` : "no"}`,
+              `decision: ${decision.effect}${decision.rule ? ` [${decision.rule}]` : ""} ${decision.reason}`,
+              `state:\n${clip(item.state, STATE_LOG_CHARS)}`,
+            ]
+            return {
+              content: lines.join("\n"),
+              metadata: {
+                action,
+                resource: item.label,
+                trust: item.trust,
+                verdict,
+                source,
+                uncertain: verdict.uncertain === true,
+                effect: decision.effect,
+                rule: decision.rule,
+                userAllow: user.allow,
+              },
+            }
           },
         })
       })
