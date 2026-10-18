@@ -1,6 +1,6 @@
 // Wiring tests for the auto-mode permission hook: a fake `ctx` captures the
 // handlers `setup` registers, a fake `session.get` supplies the ruleset, and a
-// fake `fetch` answers Jev, so nothing here touches the network or needs a key.
+// fake `fetch` answers the classifier, so nothing here touches the network or needs a key.
 //
 // These cover the wiring that has no pure module of its own: user-rule
 // precedence, the session memo, repeated-block accounting, file provenance, and
@@ -27,7 +27,7 @@ interface HarnessInput {
   ruleset?: (input: { sessionID: string }) => Promise<unknown>
   /** Extra plugin options, merged over the auto-mode defaults. */
   options?: Record<string, unknown>
-  /** The answers the fake Jev returns for a state; throw to simulate a failure. */
+  /** The answers the fake classifier returns for a state; throw to simulate a failure. */
   reply?: (state: string) => unknown
 }
 
@@ -41,7 +41,7 @@ interface Harness {
   gets: Array<{ sessionID: string }>
   /** Prompts sent to the LLM fallback. */
   prompts: string[]
-  /** The states the plugin sent to Jev, in order. */
+  /** The states the plugin sent to the classifier, in order. */
   requests: string[]
   /** The debug log's contents, once an append matching `until` has landed. */
   log: (until?: RegExp) => Promise<string>
@@ -55,7 +55,7 @@ type ToolDefinition = {
   execute: (input: any, context: any) => Promise<{ content: string; metadata: any }>
 }
 
-/** A Jev answer set that matches no rule and rates the action harmless. */
+/** A classifier answer set that matches no rule and rates the action harmless. */
 function clean() {
   return {
     category: { choice: "read", confidence: 0.95 },
@@ -74,7 +74,7 @@ function clean() {
   }
 }
 
-/** A Jev answer set that trips a hard rule. */
+/** A classifier answer set that trips a hard rule. */
 function denied() {
   return { ...clean(), hard_deny_rule: { choice: "Data Exfiltration", confidence: 0.95 } }
 }
@@ -97,7 +97,7 @@ async function harness(input: HarnessInput = {}): Promise<Harness> {
     return {
       ok: true,
       status: 200,
-      text: async () => JSON.stringify({ model: "jev-test", answers }),
+      text: async () => JSON.stringify({ model: "classifier-test", answers }),
     }
   }) as unknown as typeof fetch
 
@@ -226,7 +226,7 @@ test("a failed ruleset lookup keeps the prompt and logs a distinct message", asy
 })
 
 test("the same state evaluated twice reuses the session memo", async (t) => {
-  // A zero TTL disables the request cache, so a second Jev call can only be
+  // A zero TTL disables the request cache, so a second classifier call can only be
   // avoided by the session memo itself.
   const h = await harness({ options: { cacheTtlMs: 0 } })
   t.after(h.dispose)
@@ -385,7 +385,7 @@ test("the classified log carries the state, truncated", async (t) => {
   assert.ok(row, "the classified line carries a state")
   const entry = JSON.parse(row.slice(row.indexOf("{")))
   const sent = h.requests[0]
-  assert.ok(sent, "the state was sent to Jev")
+  assert.ok(sent, "the state was sent to the classifier")
   assert.ok(entry.state.length < sent.length, "the logged state is truncated")
   assert.ok(entry.state.length <= 3000, "the logged state is bounded")
   assert.match(entry.state, /chars elided/)

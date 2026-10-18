@@ -171,7 +171,7 @@ const LIST_MARKER = /^\s*(?:[-*]|\d+\.)\s+/
  * action, and the assistant transcript are excluded, so a quote names a
  * statement a human made and never the text under classification.
  *
- * The state is the only input, so the same spans are available to the Jev
+ * The state is the only input, so the same spans are available to the classifier
  * question set and to the LLM fallback's quote check. Bounded to
  * `MAX_STATEMENTS`; duplicates collapse.
  */

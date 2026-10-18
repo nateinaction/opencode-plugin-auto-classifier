@@ -6,7 +6,7 @@ import {
   DEFAULT_ENDPOINT,
   DEFAULT_MODEL,
   parseAutoAnswers,
-} from "../jev.ts"
+} from "../classifier.ts"
 import { mergeRules } from "../rules.ts"
 
 type Call = { url: string; init: RequestInit }
@@ -125,7 +125,7 @@ test("maps the risk score onto the legend band", async () => {
 })
 
 test("normalizes the risk level to 0..1 rather than clamping it", async () => {
-  // Jev 1.14 answered 1.84 ("Moderate") for a source-file edit; clamping read
+  // Model 1.14 answered 1.84 ("Moderate") for a source-file edit; clamping read
   // that as maximum risk.
   const c = classifierReturning({
     ...ANSWER_BODY,
@@ -210,7 +210,7 @@ test("throws when a score is missing instead of treating it as safe", async () =
   ]
   for (const [name, override] of cases) {
     const c = classifierReturning({ ...ANSWER_BODY, answers: { ...ANSWER_BODY.answers, ...override } })
-    await assert.rejects(() => c.cls.classify("ls"), new RegExp(`jev: answer has no numeric ${name}`))
+    await assert.rejects(() => c.cls.classify("ls"), new RegExp(`classifier: answer has no numeric ${name}`))
   }
 })
 

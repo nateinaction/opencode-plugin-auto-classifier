@@ -180,8 +180,9 @@ export function decideAuto(
   const external = outbound || !located ? yes(verdict.trustExternal) : facts?.inside !== true
   // A credential is an exposure wherever it goes. Sensitive data the session
   // did not already have is an exposure only once the action carries it out of
-  // the environment; Jev's old scalar called ordinary local `pytest` and
-  // `tail` runs 50-70% risky, and every one of them became a false denial.
+  // the environment; the classifier's old scalar called ordinary local
+  // `pytest` and `tail` runs 50-70% risky, and every one of them became a false
+  // denial.
   // A listing prints names, not contents, so `new_sensitive_data` is decisive
   // only for an action that reads content: `ls`/`find` of an outside directory
   // named only files, while `sqlite3` over an outside database prints rows.
@@ -311,25 +312,25 @@ function uncertain(
 }
 
 /**
- * Decide a fallback's verdict against the Jev verdict it replaced.
+ * Decide a fallback's verdict against the classifier verdict it replaced.
  *
  * A fallback is an ordinary LLM's guess, marked at 0.5 confidence and given no
- * per-choice confidence, so it cannot override a Jev verdict that allowed the
- * action: the most it can do is turn that allow into a prompt. A dangerous
- * verdict from Jev itself is never lowered here.
+ * per-choice confidence, so it cannot override a classifier verdict that
+ * allowed the action: the most it can do is turn that allow into a prompt. A
+ * dangerous verdict from the classifier itself is never lowered here.
  */
 export function reconcileFallback(
   verdict: AutoVerdict,
-  jev: AutoVerdict | undefined,
+  classifier: AutoVerdict | undefined,
   opts: Required<Options>,
   action = "shell",
   facts?: ActionFacts,
   resource = "",
 ): AutoDecision {
   const decision = decideAuto(verdict, opts, action, facts, resource)
-  if (!jev || decision.effect !== "deny") return decision
-  if (decideAuto(jev, opts, action, facts, resource).effect !== "allow") return decision
-  return { effect: "ask", rule: decision.rule, reason: `The LLM fallback would deny what Jev allowed. ${decision.reason}` }
+  if (!classifier || decision.effect !== "deny") return decision
+  if (decideAuto(classifier, opts, action, facts, resource).effect !== "allow") return decision
+  return { effect: "ask", rule: decision.rule, reason: `The LLM fallback would deny what the classifier allowed. ${decision.reason}` }
 }
 
 export type Coverage = "classify" | "allow" | "passthrough"
@@ -449,8 +450,8 @@ function settle(verdict: AutoVerdict, lenient: boolean, floor: number): AutoVerd
 /**
  * True when a decision-relevant answer is too uncertain to act on: a rule
  * choice below `floor`, or an intent/trust signal within the ambiguous band
- * around its threshold (Jev's yes/no answers carry no confidence of their
- * own), that could flip the decision.
+ * around its threshold (the classifier's yes/no answers carry no confidence of
+ * their own), that could flip the decision.
  *
  * `decideAuto` is monotone in every answer, so settling all uncertain answers
  * at their most permissive and most restrictive ends bounds every combination:

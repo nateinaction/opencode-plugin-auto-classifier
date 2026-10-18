@@ -2,7 +2,7 @@
 // the right sidebar, colour-coded by effect:
 //   allow -> green, deny -> red, ask -> orange.
 //
-// Data comes over the JevClassifierRpc defined in rpc.ts: one `recent` call for
+// Data comes over the ClassifierRpc defined in rpc.ts: one `recent` call for
 // the history, then live `classified` events.
 //
 // This file is deliberately `.ts`, not `.tsx`, and imports host modules through
@@ -17,13 +17,13 @@
 import { Plugin } from "opentui:runtime-module:%40opencode%2Fplugin%2Ftui"
 import { For, createSignal, onCleanup } from "opentui:runtime-module:solid-js"
 import { jsx, jsxs } from "opentui:runtime-module:%40opentui%2Fsolid%2Fjsx-runtime"
-import { JevClassifierRpc } from "./rpc.ts"
+import { ClassifierRpc } from "./rpc.ts"
 import { colorFor, line, LIMIT, type Entry } from "./format.ts"
 
 export default Plugin.define({
   id: "auto-classifier.tui",
   async setup(context: any) {
-    const rpc = context.client.rpc(JevClassifierRpc)
+    const rpc = context.client.rpc(ClassifierRpc)
     // The host module is untyped (see virtual-modules.d.ts), so the value is
     // annotated here rather than through a generic type argument.
     const [entries, setEntries] = createSignal([] as Entry[])
@@ -54,7 +54,7 @@ export default Plugin.define({
           flexDirection: "column",
           get children() {
             return [
-              jsx("text", { get children() { return "Jev classifications" } }),
+              jsx("text", { get children() { return "Classifications" } }),
               jsx(For, {
                 get each() {
                   return entries()

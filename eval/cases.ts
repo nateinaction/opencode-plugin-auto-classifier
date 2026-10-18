@@ -3,7 +3,7 @@
 //
 // Two sources: the hand-written cases below, which pin a behaviour deliberately,
 // and `denials.ts`, one case per false denial in the 2026-10-17 debug log (issue
-// #2). `selectCases` returns both, so `npm run eval` (Jev) and
+// #2). `selectCases` returns both, so `npm run eval` (the classifier) and
 // `npm run eval:fallback` (`parseAutoVerdict`) run the whole corpus.
 
 import { buildState } from "../context.ts"
@@ -17,7 +17,7 @@ export type Case = {
   expect: "allow" | "ask" | "deny"
   /**
    * Further outcomes that are also right for this case. A content read outside
-   * the trusted roots asks when Jev rates its contents as new sensitive data
+   * the trusted roots asks when the classifier rates its contents as new sensitive data
    * and allows when it does not; both clear the regression (a deny), and which
    * one the model picks is noise, not a decision.
    */

@@ -1,30 +1,31 @@
-// auto-classifier - classify actions with TypeSafe Jev via OpenCode Zen or
-// OpenRouter, and fold the verdict into OpenCode's permission decisions.
+// auto-classifier - classify actions with the classifier (TypeSafe Jev, "System
+// One") served by OpenCode Zen or OpenRouter, and fold the verdict into
+// OpenCode's permission decisions.
 //
 // Two modes, selected by the `mode` option:
 //
 //   "classic" (default)
 //     A risk-score escalator. Every shell command, file read, and edit is sent
-//     to Jev for a category, a risk score, and destructive/secret
+//     to the classifier for a category, a risk score, and destructive/secret
 //     probabilities; a triggered threshold is escalated to `ask` (or `deny`).
 //     The plugin only ever raises severity.
 //
 //   "auto-mode"
-//     Behaves like Claude Code's auto classifier. Jev answers a parallel set of
-//     typed questions over an assembled state (project instructions + the
-//     user's request + the action), covering enumerated rule lists, the trust
-//     boundary, and the user's intent. Precedence is applied in code to produce
-//     a *binary* allow/deny: the classifier auto-approves actions that match no
-//     block rule, and denies the rest. A user-configured `ask` rule stays a
-//     prompt, and repeated blocks pause auto-approval so prompts resume. When a
-//     decision-relevant answer is uncertain (or Jev fails) the LLM fallback
-//     (ctx.generate.text) decides instead.
+//     Behaves like Claude Code's auto classifier. The classifier answers a
+//     parallel set of typed questions over an assembled state (project
+//     instructions + the user's request + the action), covering enumerated rule
+//     lists, the trust boundary, and the user's intent. Precedence is applied in
+//     code to produce a *binary* allow/deny: the classifier auto-approves
+//     actions that match no block rule, and denies the rest. A user-configured
+//     `ask` rule stays a prompt, and repeated blocks pause auto-approval so
+//     prompts resume. When a decision-relevant answer is uncertain (or the
+//     classifier fails) the LLM fallback (ctx.generate.text) decides instead.
 //
 // Covered permission actions: shell, read, edit, webfetch, websearch,
 // external_directory. Auto-mode auto-allows read/glob/grep and in-project
 // edits, and passes other actions through unchanged.
 //
-// Providers: `provider` selects where Jev is served; both speak the same API.
+// Providers: `provider` selects where the classifier is served; both speak the same API.
 //   "jev" (default) -> https://opencode.ai/zen/v1/systemone (key: OPENCODE_API_KEY)
 //   "openrouter"    -> https://openrouter.ai/api/alpha/decisions (key: OPENROUTER_API_KEY)
 
@@ -40,8 +41,8 @@ import type { Plugin } from "@opencode/plugin"
 import type { ToolHooks } from "@opencode/plugin/effect/tool"
 import type { PermissionEvaluation } from "@opencode/plugin/promise/permission"
 
-import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "./jev.ts"
-import { JevClassifierRpc } from "./rpc.ts"
+import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "./classifier.ts"
+import { ClassifierRpc } from "./rpc.ts"
 import { buildLabel, commitFromLock } from "./build.ts"
 import { buildAutoPrompt, buildVerdictPrompt, parseAutoVerdict, parseVerdict } from "./verdict.ts"
 import { resolvePath, resolveTrust } from "./trust.ts"
@@ -116,7 +117,7 @@ export default {
     let emitClassified: ((entry: Entry) => void) | undefined
     if (typeof ctx.rpc?.register === "function") {
       try {
-        const registration = await ctx.rpc.register(JevClassifierRpc, {
+        const registration = await ctx.rpc.register(ClassifierRpc, {
           recent: async () => ({ entries: recent }),
         })
         emitClassified = (entry: Entry) => {
@@ -161,7 +162,7 @@ export default {
     }
 
     const cache = new Map<string, { at: number; value: any }>()
-    // A verdict plus the Jev verdict it replaced, when a fallback supplied it.
+    // A verdict plus the classifier verdict it replaced, when a fallback supplied it.
     type AutoClassification = { verdict: AutoVerdict; prior?: AutoVerdict }
     const autoCache = new Map<string, { at: number; value: AutoClassification }>()
     // Decisions remembered for the session, keyed by the session and the state
@@ -192,7 +193,7 @@ export default {
         if (value && value.source === undefined) value.source = opts.provider
       } catch (error) {
         if (!canFallback()) throw error
-        log("jev failed; using fallback", opts.fallbackModel, String(error).slice(0, 140))
+        log("classifier failed; using fallback", opts.fallbackModel, String(error).slice(0, 140))
         const text = await generate(opts.fallbackModel, buildVerdictPrompt(state))
         value = {
           command: state,
@@ -408,23 +409,23 @@ export default {
         verdict.source = opts.provider
       } catch (error) {
         if (!canFallback()) throw error
-        log("jev failed; using fallback", opts.fallbackModel, String(error).slice(0, 140))
+        log("classifier failed; using fallback", opts.fallbackModel, String(error).slice(0, 140))
         try {
           verdict = await autoFallback(state, spans)
         } catch (fallbackError) {
           // Name both causes: the permission prompt is the only place a human
           // sees why the classifier was unavailable.
           log("fallback failed", String(fallbackError))
-          throw new Error(`Jev failed (${brief(error)}) and fallback ${opts.fallbackModel} failed (${brief(fallbackError)})`)
+          throw new Error(`The classifier failed (${brief(error)}) and fallback ${opts.fallbackModel} failed (${brief(fallbackError)})`)
         }
       }
 
       // Confidence-gated routing: `onUncertain` decides what an inconclusive
-      // verdict becomes. "accept" leaves Jev's own answers to decide; "tiered"
+      // verdict becomes. "accept" leaves the classifier's own answers to decide; "tiered"
       // lets the deterministic facts decide, so a missing fallback model cannot
       // deny a local test run. A fallback verdict is already the last resort:
       // it is at 0.5 confidence, so the policy questions it rather than sending
-      // it to the fallback again, and Jev's own verdict is kept to reconcile it.
+      // it to the fallback again, and the classifier's own verdict is kept to reconcile it.
       const fromFallback = verdict.source === "fallback"
       if (belowConfidence(verdict, opts.confidenceFloor, opts, action)) {
         log("inconclusive", JSON.stringify({ action, onUncertain: opts.onUncertain, verdict }))
@@ -552,7 +553,7 @@ export default {
 
     // The session's effective ruleset: `Session.Info.permissions`, the rules
     // OpenCode evaluates after the agent's own. A user's `ask` rule is final and
-    // the classifier must not auto-approve or deny it; a non-wildcard `allow`
+    // The classifier must not auto-approve or deny it; a non-wildcard `allow`
     // rule is their stated intent, and auto-mode must not deny over it.
     //
     // `permission.list` is not this source: it takes a required `{ sessionID }`
@@ -688,7 +689,7 @@ export default {
           log("classification failed", String(error))
           if (opts.failMode === "closed" && event.effect === "allow") {
             event.effect = opts.escalateTo
-            event.message = `[auto-classifier] Jev unavailable; failing ${opts.escalateTo}. (${String(error).slice(0, 120)})`
+            event.message = `[auto-classifier] The classifier is unavailable; failing ${opts.escalateTo}. (${String(error).slice(0, 120)})`
           }
           return
         }
@@ -796,9 +797,9 @@ export default {
     // asking why something was escalated, or for the agent to pre-check.
     await ctx.tool.transform((editor: any) => {
       editor.add({
-        name: "jev_classify_command",
+        name: "classify_command",
         description:
-          "Classify a shell command before running it. Returns the command category, a 0-1 risk score, and probabilities that it is destructive or exposes secrets. Backed by TypeSafe Jev (a fast decision model), not an LLM.",
+          "Classify a shell command before running it. Returns the command category, a 0-1 risk score, and probabilities that it is destructive or exposes secrets. Backed by a classifier (a fast decision model), not an LLM.",
         input: {
           type: "object",
           properties: {
@@ -857,7 +858,7 @@ export default {
         editor.add({
           name: "auto_classifier_explain",
           description:
-            "Re-run an auto-mode classification and print every answer behind the decision: the resolved trust facts, each Jev answer, whether the verdict was inconclusive, and the resulting allow/ask/deny with its rule. Use it to explain why an action was denied or to pre-check one before running it.",
+            "Re-run an auto-mode classification and print every answer behind the decision: the resolved trust facts, each classifier answer, whether the verdict was inconclusive, and the resulting allow/ask/deny with its rule. Use it to explain why an action was denied or to pre-check one before running it.",
           input: {
             type: "object",
             properties: {
@@ -889,7 +890,7 @@ export default {
             const { verdict, prior } = await classifyAuto(item.state, action, context?.signal)
             const decision = reconcileFallback(verdict, prior, opts, action, item.trust, item.label)
             const user = await userRules(sessionID, action, [item.label])
-            const source = verdict.source === "fallback" ? (prior ? "LLM fallback (Jev was inconclusive)" : "LLM fallback (Jev failed)") : (verdict.source ?? "jev")
+            const source = verdict.source === "fallback" ? (prior ? "LLM fallback (the classifier was inconclusive)" : "LLM fallback (the classifier failed)") : (verdict.source ?? "jev")
             const lines = [
               `action: ${action}`,
               `resource: ${item.label}`,

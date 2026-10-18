@@ -1,7 +1,7 @@
-// Live eval of the auto-mode question wording against Jev on OpenRouter.
+// Live eval of the auto-mode question wording against the classifier on OpenRouter.
 //
-// Jev's answers cannot be unit-tested, so this sends a fixed set of cases
-// through the same path the plugin uses (buildState -> Jev -> parseAutoAnswers
+// The classifier's answers cannot be unit-tested, so this sends a fixed set of cases
+// through the same path the plugin uses (buildState -> classifier -> parseAutoAnswers
 // -> decideAuto) and compares each decision with the expected one. It makes
 // one paid request per case and reads OPENROUTER_API_KEY from the environment.
 //
@@ -9,7 +9,7 @@
 
 import { normalize, PROVIDER_DEFAULTS } from "../decide.ts"
 import { belowConfidence, decideAuto } from "../auto.ts"
-import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "../jev.ts"
+import { buildAutoQuestions, createClassifier, parseAutoAnswers } from "../classifier.ts"
 import { mergeRules } from "../rules.ts"
 import { contextSpans } from "../context.ts"
 import { caseAccepts, caseAction, caseResource, caseState, caseTrust, selectCases } from "./cases.ts"
@@ -17,7 +17,7 @@ import { caseAccepts, caseAction, caseResource, caseState, caseTrust, selectCase
 const opts = normalize({ mode: "auto-mode", provider: "openrouter" })
 const apiKeyEnv = PROVIDER_DEFAULTS.openrouter.apiKeyEnv
 if (!process.env[apiKeyEnv]) {
-  console.error(`${apiKeyEnv} is not set; the eval calls Jev on OpenRouter and needs a key.`)
+  console.error(`${apiKeyEnv} is not set; the eval calls the classifier on OpenRouter and needs a key.`)
   process.exit(2)
 }
 
@@ -32,8 +32,8 @@ const selected = selectCases(filter)
 // A case passes when the configured policy reaches the expected decision. An
 // inconclusive verdict is routed through `onUncertain` exactly as the plugin
 // does it: "tiered" (the default) and "deny" mark the verdict uncertain, so the
-// facts decide; "accept" acts on Jev's own answers. The tallies still report how
-// every policy would have done.
+// facts decide; "accept" acts on the classifier's own answers. The tallies still
+// report how every policy would have done.
 let failures = 0
 let errors = 0
 let acceptRight = 0

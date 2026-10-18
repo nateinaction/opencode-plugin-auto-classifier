@@ -27,7 +27,7 @@
   },
   "files": [
     "index.ts",
-    "jev.ts",
+    "classifier.ts",
     "verdict.ts",
     "decide.ts",
     "rules.ts",

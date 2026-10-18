@@ -1,5 +1,5 @@
 // The 2026-10-17 denial corpus: 63 false denials, one case each. These are the
-// invariants that keep the corpus honest without calling Jev: that every
+// invariants that keep the corpus honest without calling the classifier: that every
 // logged denial is represented, that its facts resolve the way the rules need,
 // and that the user's own allowlist can still settle the reads a retro needs.
 //
@@ -82,9 +82,10 @@ test("every denial in the corpus is a false denial: the rules allow or ask, neve
 })
 
 test("the six reads outside the roots accept both the prompt and the allow", () => {
-  // A content read outside the trusted roots asks when Jev rates its contents
-  // as new sensitive data; the log is the session's own decisions, so Jev often
-  // rates it as not-new and the same rules allow. Either clears the regression.
+  // A content read outside the trusted roots asks when the classifier rates its
+  // contents as new sensitive data; the log is the session's own decisions, so
+  // the classifier often rates it as not-new and the same rules allow. Either
+  // clears the regression.
   const review = DENIAL_CASES.filter((c) => c.expect === "ask" && (c.alsoAccept ?? []).includes("allow"))
   assert.equal(review.length, 6)
   for (const c of review) {

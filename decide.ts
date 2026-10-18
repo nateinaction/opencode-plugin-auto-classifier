@@ -2,7 +2,7 @@
 //
 // Everything in this module is side-effect free and depends only on its
 // arguments, so it can be unit-tested without the OpenCode plugin runtime. The
-// server plugin (index.ts) imports these to turn a Jev classification into an
+// server plugin (index.ts) imports these to turn a classifier classification into an
 // OpenCode permission decision.
 
 import type { RuleLists } from "./rules.ts"
@@ -11,7 +11,7 @@ export type FailMode = "open" | "closed"
 export const UNCERTAIN_POLICIES = ["tiered", "fallback", "accept", "deny"] as const
 export type UncertainPolicy = (typeof UNCERTAIN_POLICIES)[number]
 
-/** Where Jev is served: OpenCode Zen ("jev") or OpenRouter ("openrouter"). */
+/** Where the classifier is served: OpenCode Zen ("jev") or OpenRouter ("openrouter"). */
 export type Provider = "jev" | "openrouter"
 
 export type ActionThresholds = { risk?: number; destructive?: number; secret?: number }
@@ -31,17 +31,17 @@ export type Options = {
   /** auto-mode: a decision-relevant answer below this is uncertain (see `onUncertain`). */
   confidenceFloor?: number
   /**
-   * auto-mode: what an uncertain Jev verdict becomes. "tiered" (the auto-mode
+   * auto-mode: what an uncertain the classifier verdict becomes. "tiered" (the auto-mode
    * default) lets the deterministic facts decide: local work allows, while a
    * destructive, credential-bearing, privileged, or outbound action does not.
-   * "fallback" asks the LLM fallback, "accept" acts on Jev's own answers, and
-   * "deny" blocks the action. Jev failing outright is governed by `fallback`
+   * "fallback" asks the LLM fallback, "accept" acts on the classifier's own answers, and
+   * "deny" blocks the action. The classifier failing outright is governed by `fallback`
    * and `failMode` instead.
    */
   onUncertain?: UncertainPolicy
   /** auto-mode: stop classifying and resume prompting after this many blocks. */
   repeatBlocks?: { consecutive?: number; total?: number }
-  /** Where Jev is served. Defaults to "jev" (OpenCode Zen). */
+  /** Where the classifier is served. Defaults to "jev" (OpenCode Zen). */
   provider?: Provider
   model?: string
   endpoint?: string
@@ -72,7 +72,7 @@ export type Decision = {
 }
 
 // Per-provider defaults, so selecting a provider picks its model and endpoint
-// unless the user overrides them. Both providers serve Jev with the same
+// unless the user overrides them. Both providers serve the classifier with the same
 // state + typed-questions API: OpenCode Zen's System One endpoint, or
 // OpenRouter's Decisions API (an alpha endpoint, so its path may change).
 // `apiKeyEnv` names the environment variable holding that provider's key, so
@@ -157,22 +157,22 @@ export function decide(classification: any, opts: Required<Options>, action = "s
   const escRisk = esc.risk ?? opts.askRisk
 
   if (destructive >= opts.denyDestructive) {
-    return { effect: "deny", reason: `Jev flagged this as destructive. ${bits}` }
+    return { effect: "deny", reason: `The classifier flagged this as destructive. ${bits}` }
   }
   if (secretExposure >= opts.denySecret) {
-    return { effect: "deny", reason: `Jev flagged certain secret exposure. ${bits}` }
+    return { effect: "deny", reason: `The classifier flagged certain secret exposure. ${bits}` }
   }
   if (shell && risk >= opts.denyRisk) {
-    return { effect: "deny", reason: `Jev rated this action critical. ${bits}` }
+    return { effect: "deny", reason: `The classifier rated this action critical. ${bits}` }
   }
   if (destructive >= escDestructive) {
-    return escalate(`Jev flagged possible data loss. ${bits}`)
+    return escalate(`The classifier flagged possible data loss. ${bits}`)
   }
   if (secretExposure >= escSecret) {
-    return escalate(`Jev flagged possible secret exposure. ${bits}`)
+    return escalate(`The classifier flagged possible secret exposure. ${bits}`)
   }
   if (shell && risk >= escRisk) {
-    return escalate(`Jev rated this action risky. ${bits}`)
+    return escalate(`The classifier rated this action risky. ${bits}`)
   }
   if (shell && opts.privilegedAsk && category === "privileged") {
     return escalate(`Privileged action. ${bits}`)
@@ -197,7 +197,7 @@ export function normalize(options: Options): Required<Options> {
   if (merged.mode === "auto-mode" && options.onUncertain === undefined) merged.onUncertain = "tiered"
   // A misspelled policy must not act on uncertain verdicts as "accept" would.
   if (!UNCERTAIN_POLICIES.includes(merged.onUncertain)) merged.onUncertain = "deny"
-  // auto-mode leaves deletion to its rules and the user's stated intent. Jev
+  // auto-mode leaves deletion to its rules and the user's stated intent. The classifier
   // rates nearly every rm 95-98% destructive, so a 0.97 backstop denies at
   // random and overrides an explicit request; denySecret and denyRisk are
   // already off.
@@ -209,7 +209,7 @@ export function rank(effect: "allow" | "ask" | "deny"): number {
   return effect === "deny" ? 2 : effect === "ask" ? 1 : 0
 }
 
-// Map a permission action + resource to a state Jev can reason about.
+// Map a permission action + resource to a state the classifier can reason about.
 // Shell resources are command strings; read/edit resources are file paths,
 // which we describe in words because a bare path carries little signal.
 export function describe(action: string, resource: string): string | undefined {

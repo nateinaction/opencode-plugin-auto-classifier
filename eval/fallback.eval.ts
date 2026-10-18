@@ -1,7 +1,7 @@
 // Live eval of the auto-mode LLM fallback.
 //
-// The plugin hands an inconclusive Jev verdict (or a Jev failure) to a general
-// model. Its answer carries confidence 0.5 and no per-choice confidence, so
+// The plugin hands an inconclusive classifier verdict (or a classifier failure) to
+// a general model. Its answer carries confidence 0.5 and no per-choice confidence, so
 // under the default `onUncertain: "tiered"` the facts decide; the fallback's
 // rule labels cannot deny a local action on their own. This sends every case
 // through the fallback path the plugin uses (buildAutoPrompt -> model ->

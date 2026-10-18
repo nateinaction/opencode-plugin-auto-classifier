@@ -2,7 +2,7 @@
 // Code's `autoMode` configuration.
 //
 // Rules are prose entries shaped "Label: definition", the same way Claude Code
-// writes them. The label becomes the criterion key Jev chooses from, so a
+// writes them. The label becomes the criterion key the classifier chooses from, so a
 // verdict can name the rule it matched (e.g. `[Git Destructive]`). A list may
 // include the literal "$defaults" to splice the built-in entries at that
 // position; a list without it replaces the defaults for that section, exactly
@@ -30,7 +30,7 @@ export const NONE = "none"
 /**
  * Built-in rule set for `auto-mode`. A distilled subset of Claude Code's
  * published defaults: enough to cover the common destructive/external cases
- * while staying matchable as Jev `choice` criteria.
+ * while staying matchable as the classifier's `choice` criteria.
  */
 export const DEFAULT_RULES: Required<RuleLists> = {
   hard_deny: [
@@ -78,9 +78,9 @@ export function ruleKey(rule: string): string {
 }
 
 /**
- * Build Jev `choice` criteria for a rule list: criterion key -> full rule text,
- * always including a `none` option so a verdict can say "no rule matched".
- * Duplicate labels are disambiguated so every key is unique.
+ * Build the classifier's `choice` criteria for a rule list: criterion key ->
+ * full rule text, always including a `none` option so a verdict can say "no
+ * rule matched". Duplicate labels are disambiguated so every key is unique.
  */
 export function choiceCriteria(rules: readonly string[]): Record<string, string> {
   const criteria: Record<string, string> = {}

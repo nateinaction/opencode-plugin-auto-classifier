@@ -1,9 +1,10 @@
-// TypeSafe Jev ("System One") client.
+// Classifier client: TypeSafe Jev ("System One"), served by OpenCode Zen or
+// OpenRouter.
 //
-// Jev is a decision model: you send it a `state` (unstructured text, here a
-// shell command or an assembled context) plus typed `questions`, and it returns
-// typed answers with calibrated probabilities rather than generated text. It is
-// not an LLM and it does not stream.
+// The classifier is a decision model: you send it a `state` (unstructured text,
+// here a shell command or an assembled context) plus typed `questions`, and it
+// returns typed answers with calibrated probabilities rather than generated
+// text. It is not an LLM and it does not stream.
 //
 // The same request/response shape is served by two endpoints, selected by the
 // plugin's `provider` option:
@@ -11,8 +12,8 @@
 //                 verified 2026-10-11 with jev-1.13; needs an inference-scoped key
 //   openrouter -> https://openrouter.ai/api/alpha/decisions (OpenRouter Decisions)
 //                 verified 2026-10-15 with typesafe/jev-1.14; needs an OpenRouter key
-// There is deliberately no free-model default: calls are either the paid Jev
-// model (with a key) or, when that fails, the plugin's LLM fallback.
+// There is deliberately no free-model default: calls are either the paid
+// classifier (with a key) or, when that fails, the plugin's LLM fallback.
 
 import { choiceCriteria, NONE, type RuleLists } from "./rules.ts"
 import type { AutoVerdict } from "./auto.ts"
@@ -20,7 +21,7 @@ import type { AutoVerdict } from "./auto.ts"
 export const DEFAULT_ENDPOINT = "https://opencode.ai/zen/v1/systemone"
 export const DEFAULT_MODEL = "jev-1.13"
 
-export type JevOptions = {
+export type ClassifierOptions = {
   /** Model id. Defaults to "jev-1.13" (paid, needs an inference key). */
   model?: string
   /** System One endpoint. Defaults to the OpenCode Zen route. */
@@ -35,26 +36,26 @@ export type JevOptions = {
   fetch?: typeof fetch
 }
 
-export type JevCategory = {
+export type ClassifierCategory = {
   choice: string
   confidence: number
   probabilities: Record<string, number>
 }
 
-export type JevRisk = {
+export type ClassifierRisk = {
   score: number
   confidence: number
   legend?: Record<string, string>
   probabilities?: Record<string, number>
 }
 
-export type JevNoul = { noul: number; confidence?: number }
+export type ClassifierNoul = { noul: number; confidence?: number }
 
-export type JevAnswers = {
-  category: JevCategory
-  risk: JevRisk
-  destructive: JevNoul
-  secret_exposure: JevNoul
+export type ClassifierAnswers = {
+  category: ClassifierCategory
+  risk: ClassifierRisk
+  destructive: ClassifierNoul
+  secret_exposure: ClassifierNoul
 }
 
 export type Classification = {
@@ -70,19 +71,19 @@ export type Classification = {
   destructive: number
   /** 0..1 probability the command leaks secrets or credentials. */
   secretExposure: number
-  answers: JevAnswers
+  answers: ClassifierAnswers
   usage?: unknown
 }
 
-/** A single typed question sent to Jev. */
-export type JevQuestion = {
+/** A single typed question sent to the classifier. */
+export type ClassifierQuestion = {
   type: "choice" | "score" | "noul"
   instructions: string
   /** `choice` maps key -> definition; `score` is an ordered list of levels. */
   criteria?: Record<string, string> | string[]
 }
 
-export type JevAnswersMap = Record<string, any>
+export type ClassifierAnswersMap = Record<string, any>
 
 const CATEGORIES: Record<string, string> = {
   read: "Reads or inspects files, directories, processes, or state without changing anything",
@@ -103,18 +104,18 @@ const RISK_LEVELS = [
   "Critical: destructive or irreversible (data loss, system damage)",
 ]
 
-// Jev answers a score question on the scale of its criteria indices
+// The classifier answers a score question on the scale of its criteria indices
 // (0..RISK_LEVELS.length - 1), not 0..1. Dividing by the top index gives the
 // 0..1 risk the decision thresholds expect.
 export const TOP_RISK_LEVEL = RISK_LEVELS.length - 1
 
 /** The classic question set: category, risk, destructive, secret exposure. */
-export function buildQuestions(): Record<string, JevQuestion> {
+export function buildQuestions(): Record<string, ClassifierQuestion> {
   return baseQuestions("shell command")
 }
 
 /** The four questions shared by both modes, phrased for the given noun. */
-function baseQuestions(noun: string): Record<string, JevQuestion> {
+function baseQuestions(noun: string): Record<string, ClassifierQuestion> {
   return {
     category: {
       type: "choice",
@@ -144,23 +145,24 @@ function baseQuestions(noun: string): Record<string, JevQuestion> {
  * state.
  *
  * Exposure is asked as two binary facts rather than the classic
- * `secret_exposure` scalar, which Jev reported at 0.5-0.7 for ordinary local
- * work (`echo`, `tail`, `pytest`) and so made every local action "sensitive".
+ * `secret_exposure` scalar, which the classifier reported at 0.5-0.7 for
+ * ordinary local work (`echo`, `tail`, `pytest`) and so made every local action
+ * "sensitive".
  * A credential is an exposure wherever it goes; data the session does not
  * already have is an exposure only when the action carries it out. Precedence
  * applies that distinction; this question set only reports it.
  *
  * The intent questions come in pairs: a yes/no answer, and a choice of the
- * statement that backs it. Jev does not generate text, so the quote has to be
- * chosen from the user's own words rather than written; `spans` are the
- * candidate statements from the state's context. Without a choice, the yes/no
- * answer carries no evidence and `parseAutoAnswers` drops it.
+ * statement that backs it. The classifier does not generate text, so the quote
+ * has to be chosen from the user's own words rather than written; `spans` are
+ * the candidate statements from the state's context. Without a choice, the
+ * yes/no answer carries no evidence and `parseAutoAnswers` drops it.
  */
-export function buildAutoQuestions(rules: Required<RuleLists>, spans: readonly string[] = []): Record<string, JevQuestion> {
+export function buildAutoQuestions(rules: Required<RuleLists>, spans: readonly string[] = []): Record<string, ClassifierQuestion> {
   const trusted = rules.environment.length ? rules.environment.join(" ") : "the working repository"
   // The classic set's category and risk questions, at auto-mode's wording.
   const { category, risk } = baseQuestions("action")
-  const questions: Record<string, JevQuestion> = {
+  const questions: Record<string, ClassifierQuestion> = {
     hard_deny_rule: {
       type: "choice",
       instructions: "Which unconditional security boundary (hard-deny rule), if any, does this action violate?",
@@ -264,7 +266,7 @@ export function chosenStatement(key: unknown, spans: readonly string[]): string 
 /** Read one numeric answer; throws when it is missing or not a number. */
 function numeric(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`jev: answer has no numeric ${name}: ${JSON.stringify(value) ?? "undefined"}`)
+    throw new Error(`classifier: answer has no numeric ${name}: ${JSON.stringify(value) ?? "undefined"}`)
   }
   return value
 }
@@ -294,7 +296,7 @@ function optionalString(value: unknown): string | undefined {
  * guessed boundary or authorization carries no signal; the statement is kept
  * as the quote so the log and the permission message show what was relied on.
  */
-export function parseAutoAnswers(answers: JevAnswersMap, spans: readonly string[] = []): AutoVerdict {
+export function parseAutoAnswers(answers: ClassifierAnswersMap, spans: readonly string[] = []): AutoVerdict {
   const softDenyRule = optionalString(answers?.soft_deny_rule?.choice)
   const risk = clamp01(numeric(answers?.risk?.score, "risk") / TOP_RISK_LEVEL)
   const destructive = clamp01(numeric(answers?.destructive?.noul, "destructive"))
@@ -341,11 +343,10 @@ function decisiveChoices(softDenyRule: string | undefined): string[] {
 type FetchLike = typeof fetch
 
 /**
- * Build a classifier that sends states to Jev and returns structured answers.
- * Each call is a single System One request; all questions are answered in
- * parallel by the model.
+ * Build a client for the classifier. Each call is one System One request
+ * carrying a state and its typed questions; every answer comes back with it.
  */
-export function createClassifier(options: JevOptions = {}) {
+export function createClassifier(options: ClassifierOptions = {}) {
   const model = options.model ?? DEFAULT_MODEL
   const endpoint = options.endpoint ?? DEFAULT_ENDPOINT
   const apiKey = options.apiKey ?? process.env[options.apiKeyEnv ?? "OPENCODE_API_KEY"] ?? undefined
@@ -354,10 +355,10 @@ export function createClassifier(options: JevOptions = {}) {
 
   async function request(
     state: string,
-    questions: Record<string, JevQuestion>,
+    questions: Record<string, ClassifierQuestion>,
     signal?: AbortSignal,
-  ): Promise<{ model: string; usage?: unknown; answers?: JevAnswersMap }> {
-    if (!state || !state.trim()) throw new Error("jev: empty state")
+  ): Promise<{ model: string; usage?: unknown; answers?: ClassifierAnswersMap }> {
+    if (!state || !state.trim()) throw new Error("classifier: empty state")
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -382,17 +383,17 @@ export function createClassifier(options: JevOptions = {}) {
 
       const text = await response.text()
       if (!response.ok) {
-        throw new Error(`jev: HTTP ${response.status}: ${text.slice(0, 300)}`)
+        throw new Error(`classifier: HTTP ${response.status}: ${text.slice(0, 300)}`)
       }
 
       let body: any
       try {
         body = JSON.parse(text)
       } catch {
-        throw new Error(`jev: invalid JSON response: ${text.slice(0, 200)}`)
+        throw new Error(`classifier: invalid JSON response: ${text.slice(0, 200)}`)
       }
 
-      return { model: body.model ?? model, usage: body.usage, answers: body?.answers as JevAnswersMap | undefined }
+      return { model: body.model ?? model, usage: body.usage, answers: body?.answers as ClassifierAnswersMap | undefined }
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener("abort", onAbort)
@@ -403,7 +404,7 @@ export function createClassifier(options: JevOptions = {}) {
     const { model: resolved, usage, answers } = await request(state, buildQuestions(), signal)
 
     if (!answers?.category || !answers?.risk) {
-      throw new Error(`jev: unexpected response shape: ${JSON.stringify(answers ?? null).slice(0, 200)}`)
+      throw new Error(`classifier: unexpected response shape: ${JSON.stringify(answers ?? null).slice(0, 200)}`)
     }
 
     // Missing scores throw rather than defaulting to 0, the safe end of
@@ -423,7 +424,7 @@ export function createClassifier(options: JevOptions = {}) {
       riskLegend,
       destructive,
       secretExposure,
-      answers: answers as JevAnswers,
+      answers: answers as ClassifierAnswers,
       usage,
     }
   }
@@ -431,9 +432,9 @@ export function createClassifier(options: JevOptions = {}) {
   /** Send an arbitrary question set and return the raw answers. */
   async function answer(
     state: string,
-    questions: Record<string, JevQuestion>,
+    questions: Record<string, ClassifierQuestion>,
     signal?: AbortSignal,
-  ): Promise<{ model: string; usage?: unknown; answers: JevAnswersMap }> {
+  ): Promise<{ model: string; usage?: unknown; answers: ClassifierAnswersMap }> {
     const { model: resolved, usage, answers } = await request(state, questions, signal)
     return { model: resolved, usage, answers: answers ?? {} }
   }

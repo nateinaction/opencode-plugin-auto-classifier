@@ -57,7 +57,7 @@ test("rank orders allow < ask < deny", () => {
   assert.ok(rank("ask") < rank("deny"))
 })
 
-test("describe maps actions to Jev state text", () => {
+test("describe maps actions to the classifier's state text", () => {
   assert.equal(describeAction("shell", "rm -rf /"), "rm -rf /")
   assert.equal(describeAction("read", "/etc/passwd"), "Read the contents of the file at: /etc/passwd")
   assert.equal(describeAction("edit", "index.ts"), "Write to or modify the file at: index.ts")

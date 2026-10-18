@@ -7,7 +7,7 @@ through OpenCode Zen or, with `"provider": "openrouter"`, through
 API, so the plugin behaves the same either way.
 
 Before a shell command runs — or a file is read or edited — the plugin sends the
-resource to Jev, which answers typed questions about it:
+resource to the classifier, which answers typed questions about it:
 
 | Question         | Type     | Meaning                                             |
 | ---------------- | -------- | --------------------------------------------------- |
@@ -66,11 +66,11 @@ paths work too, which is handy for local development:
 
 ### Requirements
 
-- A paid Jev (System One) key for the selected provider, or the LLM fallback
-  (see [Configuration](#configuration)): an inference-scoped OpenCode Console
-  key in `OPENCODE_API_KEY` (default `jev` provider), or an OpenRouter key in
-  `OPENROUTER_API_KEY` (`openrouter` provider). Without a key the plugin fails
-  open by default.
+- A paid classifier key (TypeSafe Jev, "System One") for the selected
+  provider, or the LLM fallback (see [Configuration](#configuration)): an
+  inference-scoped OpenCode Console key in `OPENCODE_API_KEY` (default `jev`
+  provider), or an OpenRouter key in `OPENROUTER_API_KEY` (`openrouter`
+  provider). Without a key the plugin fails open by default.
 - The TUI sidebar half imports OpenCode's bundled OpenTUI/`solid-js` host
   modules through their runtime ids (`opentui:runtime-module:*`), so it works
   from a `node_modules` install without shipping its own copies. It is optional;
@@ -78,7 +78,7 @@ paths work too, which is handy for local development:
 
 ## What it covers
 
-| Permission action | Resource          | State sent to Jev                                |
+| Permission action | Resource          | State sent to the classifier                      |
 | ----------------- | ----------------- | ------------------------------------------------ |
 | `shell`           | command string    | the command text itself                          |
 | `read`            | file path         | `Read the contents of the file at: <path>`       |
@@ -97,9 +97,9 @@ Other actions are ignored.
   otherwise prompt on every source edit.
 - **Configurable target.** `escalateTo` picks what a triggered threshold becomes:
   `"ask"` (prompt, default) or `"deny"` (allow-or-deny, no prompts).
-- **Fail open by default.** If Jev is unreachable the decision is left
+- **Fail open by default.** If the classifier is unreachable the decision is left
   unchanged. Set `"failMode": "closed"` to escalate to `ask` instead.
-- **LLM fallback.** When Jev fails (rate limit, timeout, network), the plugin
+- **LLM fallback.** When the classifier fails (rate limit, timeout, network), the plugin
   re-classifies through `ctx.generate.text` using a normal model
   (`opencode-go/deepseek-v4.1-flash` by default), asking it for the same JSON
   verdict. This runs over OpenCode's own provider transport, so it needs no
@@ -109,8 +109,8 @@ Other actions are ignored.
 
 ## Files
 
-- `index.ts` — server plugin: permission hook + `jev_classify_command` tool (and `auto_classifier_rules` in auto-mode).
-- `jev.ts` — Jev client (System One request/response, timeouts, abort, classic + auto question sets).
+- `index.ts` — server plugin: permission hook + `classify_command` tool (and `auto_classifier_rules` in auto-mode).
+- `classifier.ts` — the classifier client (System One request/response, timeouts, abort, classic + auto question sets).
 - `verdict.ts` — LLM fallback prompts and verdict parsers (classic and auto), unit-tested.
 - `decide.ts` — pure decision logic for the classic mode (thresholds, escalation, `describe`), unit-tested.
 - `rules.ts` — auto-mode rule lists, `$defaults` merge, and rule→criteria, unit-tested.
@@ -185,9 +185,9 @@ passed through the object form:
 | `rules`            | `{}`             | auto-mode rule lists: `environment`/`allow`/`soft_deny`/`hard_deny` |
 | `conversationContext` | `prompt`      | auto-mode context sent: `none` / `prompt` (last 3 user messages + AGENTS.md) / `session` |
 | `confidenceFloor`  | `0.6`            | auto-mode: below this, an answer is uncertain (see `onUncertain`) |
-| `onUncertain`      | `tiered` (auto-mode) | auto-mode: an uncertain Jev verdict or fallback answer is decided by the deterministic facts (`tiered`), goes to the LLM fallback (`fallback`), decides on its own answers (`accept`), or is denied as `Uncertain` (`deny`); an unknown value denies |
+| `onUncertain`      | `tiered` (auto-mode) | auto-mode: an uncertain classifier verdict or fallback answer is decided by the deterministic facts (`tiered`), goes to the LLM fallback (`fallback`), decides on its own answers (`accept`), or is denied as `Uncertain` (`deny`); an unknown value denies |
 | `repeatBlocks`     | `{3, 20}`        | auto-mode: consecutive/total blocks before prompting resumes  |
-| `provider`         | `jev`            | where Jev is served: `jev` (OpenCode Zen) or `openrouter`     |
+| `provider`         | `jev`            | where the classifier is served: `jev` (OpenCode Zen) or `openrouter`     |
 | `model`            | per provider     | `jev-1.13` (jev) / `typesafe/jev-1.14` (openrouter)           |
 | `endpoint`         | per provider     | Zen System One / OpenRouter Decisions (`/api/alpha/decisions`) |
 | `apiKey`           | per provider     | `OPENCODE_API_KEY` (`oc_sk_...`) / `OPENROUTER_API_KEY`       |
@@ -201,7 +201,7 @@ passed through the object form:
 | `denySecret`       | `1.01`           | classic: secret exposure; auto-mode: `reveals_credentials` >= this -> `deny` (off by default) |
 | `denyRisk`         | `1.01`           | risk >= this -> `deny` (off by default, `shell` only)         |
 | `privilegedAsk`    | `true`           | always escalate `priv`/`sudo`-style commands                  |
-| `fallback`         | `true`           | use `ctx.generate.text` when Jev fails                        |
+| `fallback`         | `true`           | use `ctx.generate.text` when the classifier fails                        |
 | `fallbackModel`    | `opencode-go/deepseek-v4.1-flash` | `provider/model` used for the fallback       |
 | `failMode`         | `open`           | `open` leaves the decision unchanged on error; `closed` escalates |
 | `cacheTtlMs`       | `300000`         | Classification cache TTL                                      |
@@ -244,23 +244,24 @@ rather than a score escalator. The differences:
   directory (`$TMPDIR/opencode`, trusted like the repo, since the agent keeps
   working copies and worktrees there), so explicit intent clears a soft block
   and a stated boundary blocks. Assistant text and tool results are never sent.
-- **Hybrid.** Jev answers a parallel question set over the assembled state.
-  When Jev fails, the LLM fallback decides. When Jev's verdict is uncertain (an
-  answer below `confidenceFloor`, or a yes/no signal near 50%, that could flip
-  allow vs deny), `onUncertain` decides: the deterministic facts (`tiered`, the
-  default — see below), the LLM fallback, Jev's own answers (`accept`), or a
-  denial (`deny`). A near-50% signal that cannot change the outcome (e.g. "did
-  the user authorize this?" when no soft rule matched) is not uncertain. Jev's
-  uncertain verdict is written to the debug log either way.
+- **Hybrid.** The classifier answers a parallel question set over the assembled
+  state. When the classifier fails, the LLM fallback decides. When the
+  classifier's verdict is uncertain (an answer below `confidenceFloor`, or a
+  yes/no signal near 50%, that could flip allow vs deny), `onUncertain` decides:
+  the deterministic facts (`tiered`, the default — see below), the LLM fallback,
+  the classifier's own answers (`accept`), or a denial (`deny`). A near-50%
+  signal that cannot change the outcome (e.g. "did the user authorize this?"
+  when no soft rule matched) is not uncertain. The classifier's uncertain verdict
+  is written to the debug log either way.
 - **The fallback is a guess, not a verdict.** Its answers carry confidence 0.5
   and no per-choice confidence, so they are questionable rather than final: a
-  fallback denial of something Jev itself allowed becomes a prompt, never a denial. A
-  fallback's `user_forbids` and `user_authorizes` need a verbatim
-  `boundary_quote` / `authorization_quote` from your requests or the project
-  instructions; without one each is discarded. If the fallback model is
+  fallback denial of something the classifier itself allowed becomes a prompt,
+  never a denial. A fallback's `user_forbids` and `user_authorizes` need a
+  verbatim `boundary_quote` / `authorization_quote` from your requests or the
+  project instructions; without one each is discarded. If the fallback model is
   unavailable, the permission message names it.
 - **Intent needs evidence.** A boundary or authorization answer counts only when
-  the answer also names the statement that backs it. Jev chooses one of your own
+  the answer also names the statement that backs it. The classifier chooses one of your own
   sentences from the project instructions or the last three requests (it does
   not generate text); the fallback must quote one verbatim. A guess with no
   statement behind it is no signal, in either direction. A boundary backed by
@@ -308,10 +309,10 @@ file the action deletes is one this session wrote. Denials are labelled
 
 ### Decision flow
 
-Each classified action is one Jev request carrying the typed questions below,
-answered in parallel. Jev has three question types: `choice` picks one key from
-a set of criteria and reports a confidence; `noul` answers yes/no as a 0–1
-probability; `score` places the answer on an ordered scale.
+Each classified action is one classifier request carrying the typed questions
+below, answered in parallel. The classifier has three question types: `choice`
+picks one key from a set of criteria and reports a confidence; `noul` answers
+yes/no as a 0–1 probability; `score` places the answer on an ordered scale.
 
 | Question | Type | Decides |
 | --- | --- | --- |
@@ -344,17 +345,17 @@ flowchart TD
     state --> trust["Resolve trust from the paths: working directory, scratch directory, repo worktrees; resolve delete targets against the files this session wrote"]
     trust --> cached{"Verdict cached?"}
     cached -- yes --> hard
-    cached -- no --> jev["Jev: typed questions in one request, including the statement for any boundary or authorization"]
-    jev -- "HTTP error, timeout, or missing score" --> fbError["LLM fallback"]
+    cached -- no --> classifier["Classifier: typed questions in one request, including the statement for any boundary or authorization"]
+    classifier -- "HTTP error, timeout, or missing score" --> fbError["LLM fallback"]
     fbError -- "fails or disabled, failMode closed" --> deny
     fbError -- "fails or disabled, failMode open" --> opencode["OpenCode's own decision"]
     fbError -- verdict --> conf
-    jev -- answers --> conf{"Inconclusive? An unsure choice below confidenceFloor, or a noul within 0.4-0.6, that could flip allow and deny"}
+    classifier -- answers --> conf{"Inconclusive? An unsure choice below confidenceFloor, or a noul within 0.4-0.6, that could flip allow and deny"}
     conf -- no --> hard
     conf -- "yes, accept" --> hard
     conf -- "yes, deny: Uncertain" --> deny
     conf -- "yes, fallback" --> fbLow["LLM fallback (confidence 0.5)"]
-    fbLow -- "verdict: Jev's own allow wins over a fallback deny (ask)" --> hard
+    fbLow -- "verdict: the classifier's own allow wins over a fallback deny (ask)" --> hard
     fbLow -- "fails or disabled, failMode closed" --> deny
     fbLow -- "fails or disabled, failMode open" --> opencode
     conf -- "yes, tiered (the default)" --> tiered{"Facts decide: paths inside the roots, not network, not a state-rewriting git command, reveals_credentials < 0.5, destructive < 0.5, not privileged? An allow rule settles it first; an outside read asks"}
@@ -464,11 +465,11 @@ and `privilegedAsk` are ignored in auto-mode.
 
 ## Tool
 
-The plugin registers `jev_classify_command` so the model or a human can classify
+The plugin registers `classify_command` so the model or a human can classify
 any command on demand:
 
 ```
-jev_classify_command({ "command": "rm -rf ./build" })
+classify_command({ "command": "rm -rf ./build" })
 ```
 
 In auto-mode it also registers `auto_classifier_rules` (the effective rule lists)
@@ -500,8 +501,8 @@ ENVIRONMENT:
 ...
 ```
 
-It costs one Jev request per distinct state (the same cache as the hook), and it
-is the fastest way to answer "why was this denied?" without reading the log.
+It costs one classifier request per distinct state (the same cache as the hook),
+and it is the fastest way to answer "why was this denied?" without the log.
 
 ## Examples (live results)
 
@@ -519,22 +520,23 @@ is the fastest way to answer "why was this denied?" without reading the log.
 
 ## Notes
 
-- Jev is **not** an LLM and does not stream; each call adds roughly 200-500 ms
+- The classifier is **not** an LLM and does not stream; each call adds roughly 200-500 ms
   (cached afterwards). That latency is paid only when a permission is evaluated.
-- Only two paths exist: **paid Jev** or the **LLM fallback**. There is no free
-  model default.
+- Only two paths exist: **paid classifier** or the **LLM fallback**. There is no
+  free model default.
 - The paid model needs an inference-scoped Console API key (`oc_sk_...`) passed
   as `apiKey` or `OPENCODE_API_KEY`. A key without model permission returns
   `403 "This API key can't call models"`, and the Console OAuth token is
   rejected by the zen endpoint (`401 "Invalid API key."`).
-- With `"provider": "openrouter"`, Jev is called through OpenRouter's Decisions
-  API (`https://openrouter.ai/api/alpha/decisions`) with the same typed
+- With `"provider": "openrouter"`, the classifier is called through
+  OpenRouter's Decisions API (`https://openrouter.ai/api/alpha/decisions`) with
+  the same typed
   questions, using an OpenRouter key from `apiKey` or `OPENROUTER_API_KEY`. Each
   provider reads only its own key. The Decisions API is an **alpha** endpoint,
   so its path or shape may change. Set `"model": "~typesafe/jev-latest"` to
-  follow new Jev releases instead of pinning one.
+  follow new model releases instead of pinning one.
 - The DeepSeek fallback is a normal LLM call, so it is slower and consumes the
-  fallback model's quota; it only runs after a Jev failure or, with
+  fallback model's quota; it only runs after a classifier failure or, with
   `onUncertain: "fallback"`, an uncertain auto-mode verdict.
 
 ## Development
@@ -546,9 +548,9 @@ quotable statements), `auto.ts`
 (auto-mode precedence, coverage, authority, and the session memo), `provenance.ts`
 (session file provenance and delete-target parsing), `trust.ts` (deterministic path
 resolution against the working directory, scratch directory, and repo
-worktrees), `format.ts` (sidebar rendering), `jev.ts` (the System One client,
-tested with an injected `fetch`), and `verdict.ts` (the fallback prompts and
-parsers). `test/plugin.test.ts` runs the real `setup` against a fake `ctx`, so
+worktrees), `format.ts` (sidebar rendering), `classifier.ts` (the System One
+client, tested with an injected `fetch`), and `verdict.ts` (the fallback
+prompts and parsers). `test/plugin.test.ts` runs the real `setup` against a fake `ctx`, so
 the permission hook's user-rule path is exercised without a key or a network.
 
 ```sh
@@ -573,7 +575,7 @@ network call, including that no case accepts a denial.
 Both live evals run the hand-written cases and the corpus:
 
 ```sh
-OPENROUTER_API_KEY=... npm run eval             # Jev answers; one request per case
+OPENROUTER_API_KEY=... npm run eval             # classifier answers; one request per case
 OPENROUTER_API_KEY=... npm run eval:fallback    # parseAutoVerdict; samples per case
 ```
 
@@ -584,15 +586,16 @@ OPENROUTER_API_KEY=... npm run eval:fallback    # parseAutoVerdict; samples per 
 | `EVAL_CONCURRENCY` | fallback | Cases in flight, 1-6 (default 6); lower it when the provider answers 402 for in-flight pressure |
 | `FALLBACK_MODEL` | fallback | The OpenRouter model id used as the fallback, default `deepseek/deepseek-v4.1-flash` |
 
-The Jev eval routes an inconclusive verdict through `onUncertain` exactly as the
-plugin does, so it measures the configured policy rather than the raw answers;
+The classifier eval routes an inconclusive verdict through `onUncertain` exactly
+as the plugin does, so it measures the configured policy rather than the raw
+answers;
 the fallback eval reports how many samples per case reach an accepted outcome
 and which cases flip between samples.
 
 ## Fallback
 
 ```
-paid Jev (System One)  --429/timeout/error-->  ctx.generate.text(fallbackModel)
+paid classifier (System One)  --429/timeout/error-->  ctx.generate.text(fallbackModel)
 ```
 
 The fallback prompt asks for strict JSON
@@ -608,5 +611,5 @@ In auto-mode the fallback gets the auto prompt instead (rule labels, trust,
 intent, and both exposure questions) and its answer is marked confidence 0.5
 with no per-choice confidence. A fallback `user_forbids` without a verbatim
 `boundary_quote` from the context is discarded, and a fallback denial of
-something Jev allowed becomes a prompt rather than a block. If the fallback
+something the classifier allowed becomes a prompt rather than a block. If the fallback
 model itself is unavailable, the permission message names it.

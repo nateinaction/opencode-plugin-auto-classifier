@@ -21,12 +21,13 @@
 //     adjacent lines show the session running, and say so.
 //
 // Expectations follow the rules as they now stand: none of these is denied. An
-// action inside the trusted roots is allowed whatever Jev's noise says. A
-// content read outside them asks when Jev rates its contents as new sensitive
-// data — the classifier's own log is the session's own decisions, so it often
-// does not — and `alsoAccept` records that both outcomes are the fix; a listing
-// prints names rather than contents. Only actions the rules actually block —
-// credentials, destruction, pushes, hard-deny matches — deny.
+// action inside the trusted roots is allowed whatever the classifier's noise
+// says. A content read outside them asks when the classifier rates its contents
+// as new sensitive data — the classifier's own log is the session's own
+// decisions, so it often does not — and `alsoAccept` records that both outcomes
+// are the fix; a listing prints names rather than contents. Only actions the
+// rules actually block — credentials, destruction, pushes, hard-deny matches —
+// deny.
 //
 // The count is pinned by `test/denials.test.ts`: 5 + 5 + 5 + 25 + 1 + 22 = 63.
 

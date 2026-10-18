@@ -451,16 +451,16 @@ test("an uncertain read outside the roots asks, never denies", () => {
   assert.equal(d.rule, "Uncertain")
 })
 
-test("a fallback may turn a Jev allow into a prompt, not a denial", () => {
-  const jev = verdict({ confidence: 0.9 })
+test("a fallback may turn a classifier allow into a prompt, not a denial", () => {
+  const classifier = verdict({ confidence: 0.9 })
   const fallback = verdict({ softDenyRule: "Irreversible Local Destruction", confidence: 0.5, source: "fallback" })
-  // Pinned to Jev's answers the fallback would deny `git status --short`.
+  // Pinned to the classifier's answers the fallback would deny `git status --short`.
   assert.equal(decideAuto(fallback, opts()).effect, "deny")
-  assert.equal(reconcileFallback(fallback, jev, opts()).effect, "ask")
-  // A verdict Jev itself denied is never lowered.
+  assert.equal(reconcileFallback(fallback, classifier, opts()).effect, "ask")
+  // A verdict the classifier itself denied is never lowered.
   const denied = verdict({ softDenyRule: "Git Destructive", confidence: 0.9 })
   assert.equal(reconcileFallback(fallback, denied, opts()).effect, "deny")
-  // With no Jev answer to compare, the fallback stands.
+  // With no classifier answer to compare, the fallback stands.
   assert.equal(reconcileFallback(fallback, undefined, opts()).effect, "deny")
 })
 

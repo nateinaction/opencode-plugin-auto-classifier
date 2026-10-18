@@ -2,7 +2,7 @@
 //
 // The trust boundary is a fact, not a probability: a path is either inside the
 // working directory, the agent scratch directory, or a worktree of the same
-// repository, or it is not. Jev is still asked `trust_external` because a
+// repository, or it is not. The classifier is still asked `trust_external` because a
 // command can reach the network, but where the plugin can resolve the paths
 // itself, it overrides the model rather than asking it to guess.
 //

@@ -1,8 +1,9 @@
 // Generated-verdict prompt and parser for the LLM fallback.
 //
-// When the Jev backend fails, the plugin asks a normal LLM (through
-// ctx.generate.text) for the same structured verdict Jev returns (category,
-// risk, destructive, secret_exposure) as JSON, and parses it back here.
+// When the classifier fails, the plugin asks a normal LLM (through
+// ctx.generate.text) for the same structured verdict the classifier returns
+// (category, risk, destructive, secret_exposure) as JSON, and parses it back
+// here.
 //
 // The action under classification is attacker-influenced (a command the agent
 // was talked into running can carry text aimed at the classifier), so it is
@@ -12,7 +13,7 @@
 import { normalize01 } from "./decide.ts"
 import { ruleKey, type RuleLists } from "./rules.ts"
 import { INTENT_THRESHOLD, type AutoVerdict } from "./auto.ts"
-import type { Classification } from "./jev.ts"
+import type { Classification } from "./classifier.ts"
 
 const CATEGORIES = ["read", "write", "vcs", "build", "network", "process", "privileged", "other"]
 
@@ -82,9 +83,10 @@ function score(value: unknown, name: string, label: string): number {
 
 // --- auto-mode fallback ------------------------------------------------------
 //
-// When the auto-mode classifier routes to the LLM (Jev failed, or an answer was
-// below the confidence floor), the model returns the same auto verdict shape as
-// Jev, with rule labels chosen from the configured lists.
+// When the auto-mode classifier routes to the LLM (the classifier failed, or an
+// answer was below the confidence floor), the model returns the same auto
+// verdict shape as the classifier, with rule labels chosen from the configured
+// lists.
 
 /**
  * Instructions for the auto-mode fallback. The enumerated rule labels are

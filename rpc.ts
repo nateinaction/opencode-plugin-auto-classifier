@@ -23,7 +23,7 @@ const entrySchema = {
   additionalProperties: false,
 } as const
 
-export const JevClassifierRpc = Rpc.define({
+export const ClassifierRpc = Rpc.define({
   id: "auto-classifier",
   methods: {
     recent: {
